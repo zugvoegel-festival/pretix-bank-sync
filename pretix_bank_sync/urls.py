@@ -13,6 +13,11 @@ from .views import (
     TransactionMatchReviewView,
     TransactionMatchApproveView,
     TransactionMatchRejectView,
+    OrganizerTransactionReviewView,
+    OrganizerTransactionDiscardView,
+    OrganizerTransactionAssignView,
+    OrganizerMatchApproveView,
+    OrganizerMatchRejectView,
 )
 
 urlpatterns = [
@@ -50,6 +55,31 @@ urlpatterns = [
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/transactions$',
         BankSyncTransactionsView.as_view(),
         name='transactions'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/review$',
+        OrganizerTransactionReviewView.as_view(),
+        name='review_queue'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/transactions/(?P<transaction_id>\d+)/discard$',
+        OrganizerTransactionDiscardView.as_view(),
+        name='transaction_discard'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/transactions/(?P<transaction_id>\d+)/assign$',
+        OrganizerTransactionAssignView.as_view(),
+        name='transaction_assign'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/match-suggestions/(?P<suggestion_id>\d+)/approve$',
+        OrganizerMatchApproveView.as_view(),
+        name='organizer_match_approve'
+    ),
+    re_path(
+        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/match-suggestions/(?P<suggestion_id>\d+)/reject$',
+        OrganizerMatchRejectView.as_view(),
+        name='organizer_match_reject'
     ),
     re_path(
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/fetch-transactions$',

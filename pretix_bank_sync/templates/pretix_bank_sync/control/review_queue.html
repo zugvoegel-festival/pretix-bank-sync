@@ -1,0 +1,154 @@
+{% extends "pretixcontrol/base.html" %}
+{% load i18n %}
+{% load static %}
+{% load compress %}
+
+{% block title %}{% trans "Bank transaction review" %}{% endblock %}
+
+{% block custom_header %}
+    {{ block.super }}
+    {% compress css %}
+        <link rel="stylesheet" type="text/x-scss" href="{% static "pretix_bank_sync/scss/bank_sync_common.scss" %}" />
+    {% endcompress %}
+{% endblock %}
+
+{% block content %}
+    <h1>{% trans "Bank transaction review" %}</h1>
+    <p class="help-block">
+        {% blocktrans trimmed %}
+            Review unclear matches for this organizer. Prefer payment references like
+            <code>EVENTSLUG-ORDERCODE</code>. You can approve suggestions, assign manually, or discard.
+        {% endblocktrans %}
+    </p>
+
+    <div class="bank-sync-margin-bottom">
+        <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-default">
+            <span class="fa fa-arrow-left"></span>
+            {% trans "Back to Bank Sync" %}
+        </a>
+    </div>
+
+    <div class="row bank-sync-stats">
+        <div class="col-sm-2 col-xs-6"><div class="stat-box"><span class="stat-number">{{ counts.needs_review }}</span><span class="stat-label">{% trans "Needs review" %}</span></div></div>
+        <div class="col-sm-2 col-xs-6"><div class="stat-box"><span class="stat-number text-warning">{{ counts.pending_approval }}</span><span class="stat-label">{% trans "Pending approval" %}</span></div></div>
+        <div class="col-sm-2 col-xs-6"><div class="stat-box"><span class="stat-number">{{ counts.nomatch }}</span><span class="stat-label">{% trans "No match" %}</span></div></div>
+        <div class="col-sm-2 col-xs-6"><div class="stat-box"><span class="stat-number text-success">{{ counts.matched }}</span><span class="stat-label">{% trans "Matched" %}</span></div></div>
+        <div class="col-sm-2 col-xs-6"><div class="stat-box"><span class="stat-number">{{ counts.discarded }}</span><span class="stat-label">{% trans "Discarded" %}</span></div></div>
+    </div>
+
+    <div class="panel panel-default">
+        <div class="panel-heading"><h3 class="panel-title">{% trans "Filter" %}</h3></div>
+        <div class="panel-body">
+            <form method="get" class="form-inline">
+                <select name="state" class="form-control">
+                    <option value="needs_review" {% if state_filter == 'needs_review' %}selected{% endif %}>{% trans "Needs review" %}</option>
+                    <option value="pending_approval" {% if state_filter == 'pending_approval' %}selected{% endif %}>{% trans "Pending approval" %}</option>
+                    <option value="nomatch" {% if state_filter == 'nomatch' %}selected{% endif %}>{% trans "No match" %}</option>
+                    <option value="unchecked" {% if state_filter == 'unchecked' %}selected{% endif %}>{% trans "Unchecked" %}</option>
+                    <option value="matched" {% if state_filter == 'matched' %}selected{% endif %}>{% trans "Matched" %}</option>
+                    <option value="discarded" {% if state_filter == 'discarded' %}selected{% endif %}>{% trans "Discarded" %}</option>
+                    <option value="" {% if state_filter == '' %}selected{% endif %}>{% trans "All" %}</option>
+                </select>
+                <button type="submit" class="btn btn-primary">{% trans "Filter" %}</button>
+            </form>
+        </div>
+    </div>
+
+    {% if transactions %}
+        {% for trans in transactions %}
+            <div class="panel panel-default">
+                <div class="panel-heading">
+                    <strong>{{ trans.amount }} {{ trans.currency }}</strong>
+                    · {{ trans.date|date:"SHORT_DATE_FORMAT" }}
+                    · <span class="label label-{% if trans.state == 'matched' %}success{% elif trans.state == 'pending_approval' %}warning{% elif trans.state == 'discarded' %}default{% elif trans.state == 'error' %}danger{% else %}info{% endif %}">{{ trans.get_state_display }}</span>
+                    {% if trans.order %}
+                        · <a href="{% url 'control:event.order' organizer=trans.order.event.organizer.slug event=trans.order.event.slug code=trans.order.code %}">{{ trans.order.event.slug }}-{{ trans.order.code }}</a>
+                    {% endif %}
+                </div>
+                <div class="panel-body">
+                    <p><strong>{% trans "Reference" %}:</strong> {{ trans.get_reference_text|default:"—" }}</p>
+                    {% if trans.debtor_name %}<p><strong>{% trans "Sender" %}:</strong> {{ trans.debtor_name }}</p>{% endif %}
+
+                    {% with suggestions=trans.match_suggestions.all %}
+                        {% if suggestions %}
+                            <table class="table table-condensed">
+                                <thead>
+                                    <tr>
+                                        <th>{% trans "Order" %}</th>
+                                        <th>{% trans "Type" %}</th>
+                                        <th>{% trans "Confidence" %}</th>
+                                        <th>{% trans "Reason" %}</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for suggestion in suggestions %}
+                                        <tr>
+                                            <td>
+                                                <a href="{% url 'control:event.order' organizer=suggestion.order.event.organizer.slug event=suggestion.order.event.slug code=suggestion.order.code %}">
+                                                    {{ suggestion.order.event.slug }}-{{ suggestion.order.code }}
+                                                </a>
+                                            </td>
+                                            <td>{{ suggestion.get_match_type_display }}</td>
+                                            <td>{{ suggestion.confidence_score|floatformat:2 }}</td>
+                                            <td>{{ suggestion.match_reason }}</td>
+                                            <td class="text-right">
+                                                {% if suggestion.is_approved is None %}
+                                                    <form method="post" action="{% url 'plugins:pretix_bank_sync:organizer_match_approve' organizer=organizer.slug suggestion_id=suggestion.pk %}" style="display:inline;">
+                                                        {% csrf_token %}
+                                                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                                        <button type="submit" class="btn btn-xs btn-success">{% trans "Approve" %}</button>
+                                                    </form>
+                                                    <form method="post" action="{% url 'plugins:pretix_bank_sync:organizer_match_reject' organizer=organizer.slug suggestion_id=suggestion.pk %}" style="display:inline;">
+                                                        {% csrf_token %}
+                                                        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                                        <button type="submit" class="btn btn-xs btn-default">{% trans "Reject" %}</button>
+                                                    </form>
+                                                {% elif suggestion.is_approved %}
+                                                    <span class="label label-success">{% trans "Approved" %}</span>
+                                                {% else %}
+                                                    <span class="label label-danger">{% trans "Rejected" %}</span>
+                                                {% endif %}
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        {% endif %}
+                    {% endwith %}
+
+                    {% if trans.state != 'matched' and trans.state != 'discarded' %}
+                        <div class="row">
+                            <div class="col-md-8">
+                                <form method="post" action="{% url 'plugins:pretix_bank_sync:transaction_assign' organizer=organizer.slug transaction_id=trans.pk %}" class="form-inline">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <select name="event_slug" class="form-control" required>
+                                        <option value="">{% trans "Event" %}</option>
+                                        {% for event in events %}
+                                            <option value="{{ event.slug }}">{{ event.name }} ({{ event.slug }})</option>
+                                        {% endfor %}
+                                    </select>
+                                    <input type="text" name="order_code" class="form-control" placeholder="{% trans 'Order code' %}" required>
+                                    <button type="submit" class="btn btn-primary">{% trans "Assign" %}</button>
+                                </form>
+                            </div>
+                            <div class="col-md-4 text-right">
+                                <form method="post" action="{% url 'plugins:pretix_bank_sync:transaction_discard' organizer=organizer.slug transaction_id=trans.pk %}">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="next" value="{{ request.get_full_path }}">
+                                    <button type="submit" class="btn btn-danger" onclick="return confirm('{% trans "Discard this transaction?" %}');">
+                                        {% trans "Discard" %}
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+        {% endfor %}
+        {% include "pretixcontrol/pagination.html" %}
+    {% else %}
+        <p class="text-muted">{% trans "No transactions in this filter." %}</p>
+    {% endif %}
+{% endblock %}

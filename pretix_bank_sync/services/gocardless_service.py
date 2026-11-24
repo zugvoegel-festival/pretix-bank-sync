@@ -182,6 +182,37 @@ class GoCardlessService:
             logger.error(f"Failed to get requisition {requisition_id}: {e}")
             raise Exception(f"Failed to get requisition: {e}")
 
+    def get_agreement(self, agreement_id: str) -> Optional[Dict]:
+        """Fetch an end-user agreement (includes access_valid_for_days)."""
+        if not agreement_id:
+            return None
+        access_token = self._get_access_token()
+        if not access_token:
+            raise Exception("Failed to authenticate with GoCardless")
+
+        url = f"{self.base_url}/agreements/enduser/{agreement_id}/"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.RequestException as e:
+            logger.warning(f"Failed to get agreement {agreement_id}: {e}")
+            return None
+
+    def consent_valid_days_from_requisition(self, requisition: Dict, default: int = 90) -> int:
+        """Resolve access validity days from requisition → agreement, else default."""
+        agreement_id = requisition.get('agreement') or ''
+        if isinstance(agreement_id, dict):
+            days = agreement_id.get('access_valid_for_days')
+            if days:
+                return int(days)
+            agreement_id = agreement_id.get('id') or ''
+        agreement = self.get_agreement(agreement_id) if agreement_id else None
+        if agreement and agreement.get('access_valid_for_days'):
+            return int(agreement['access_valid_for_days'])
+        return default
+
     def get_accounts(self, requisition_id: str) -> List[Dict]:
         """
         Get accounts for a requisition.
