@@ -21,10 +21,17 @@ CLIENT_SECRET_KEY = "pretix_bank_sync_gocardless_client_secret"
 REDIRECT_URI_KEY = "pretix_bank_sync_gocardless_redirect_uri"
 
 
+def _secret_key_material() -> bytes:
+    key = settings.SECRET_KEY
+    if isinstance(key, bytes):
+        return key
+    return str(key).encode("utf-8")
+
+
 def _fernet():
     from cryptography.fernet import Fernet
 
-    digest = hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
+    digest = hashlib.sha256(_secret_key_material()).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
 
 

@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 settings_hierarkey.add_default("pretix_bank_sync_gocardless_client_id", "", str)
 settings_hierarkey.add_default("pretix_bank_sync_gocardless_client_secret", "", str)
 settings_hierarkey.add_default("pretix_bank_sync_gocardless_redirect_uri", "", str)
-settings_hierarkey.add_default("pretix_bank_sync_auto_confirm", True, bool)
+# hierarkey expects a *serialized* default (string); bool True breaks some paths
+settings_hierarkey.add_default("pretix_bank_sync_auto_confirm", "True", bool)
 
 
 @receiver(nav_organizer, dispatch_uid="bank_sync_nav_organizer")

@@ -1,0 +1,64 @@
+/* Bank Sync control UI — plain CSS (no django-compressor / offline SCSS).
+ * Offline COMPRESS manifests in the Nix pretix build often omit plugin
+ * {% compress %} blocks, which raises OfflineGenerationError (HTTP 500) on
+ * every bank-sync page render including after saving credentials.
+ */
+.bank-sync-margin-bottom {
+  margin-bottom: 15px;
+}
+
+.bank-sync-stats {
+  margin-bottom: 20px;
+}
+
+.bank-sync-stats .stat-box {
+  text-align: center;
+  padding: 12px;
+  background: #f8f8f8;
+  border-radius: 4px;
+  margin-bottom: 10px;
+}
+
+.bank-sync-stats .stat-box .stat-number {
+  display: block;
+  font-size: 1.6em;
+  font-weight: bold;
+}
+
+.bank-sync-stats .stat-box .stat-label {
+  color: #666;
+  font-size: 0.9em;
+}
+
+.bank-sync-wizard-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 20px;
+  padding: 0;
+  list-style: none;
+}
+
+.bank-sync-wizard-steps li {
+  padding: 6px 12px;
+  border-radius: 4px;
+  background: #eee;
+  color: #666;
+  font-size: 0.9em;
+}
+
+.bank-sync-wizard-steps li.completed {
+  background: #dff0d8;
+  color: #3c763d;
+}
+
+.bank-sync-wizard-steps li.active {
+  background: #337ab7;
+  color: #fff;
+  font-weight: bold;
+}
+
+.bank-sync-institution-list {
+  max-height: 360px;
+  overflow-y: auto;
+}
