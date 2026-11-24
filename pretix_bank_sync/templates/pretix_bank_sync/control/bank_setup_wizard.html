@@ -42,19 +42,25 @@
                     <div class="alert alert-danger">{{ credentials_error }}</div>
                 {% endif %}
 
-                <form method="post" action="" class="form-horizontal">
+                <form method="post" action="" class="form-horizontal" autocomplete="off">
                     {% csrf_token %}
                     <input type="hidden" name="step" value="credentials">
                     <div class="form-group">
                         <label class="col-md-3 control-label">{% trans "Secret ID" %}</label>
                         <div class="col-md-9">
-                            <input type="text" name="client_id" class="form-control" value="{{ client_id }}" required>
+                            <input type="text" name="client_id" class="form-control" value="{{ client_id }}" required autocomplete="off">
                         </div>
                     </div>
                     <div class="form-group">
                         <label class="col-md-3 control-label">{% trans "Secret Key" %}</label>
                         <div class="col-md-9">
-                            <input type="password" name="client_secret" class="form-control" value="{{ client_secret }}" required>
+                            <input type="password" name="client_secret" class="form-control" value=""
+                                   autocomplete="new-password"
+                                   {% if not secret_configured %}required{% endif %}
+                                   placeholder="{% if secret_configured %}{% trans 'Leave blank to keep current encrypted key' %}{% endif %}">
+                            {% if secret_configured %}
+                                <p class="help-block">{% trans "A Secret Key is already stored encrypted. Leave blank to keep it." %}</p>
+                            {% endif %}
                         </div>
                     </div>
                     <div class="form-group">

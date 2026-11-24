@@ -36,6 +36,11 @@ transfer reference. Unclear matches appear in **Organizer → Bank Sync → Revi
 Consent expiry warnings are emailed to users with organizer settings permission;
 renew from the connections page while still active if expiry is within 14 days.
 
+Security notes: the GoCardless Secret Key is Fernet-encrypted using the pretix
+``SECRET_KEY`` and is never re-displayed in the UI. IBANs are masked in stored
+``raw_data`` and in the control panel. Bank Sync control pages require
+organizer settings permission (event match review requires order change permission).
+
 See ``INSTALLATION.md`` for detailed steps.
 
 License

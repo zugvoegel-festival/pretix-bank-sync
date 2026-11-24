@@ -23,16 +23,21 @@
         </a>
     </div>
 
-    <!-- GoCardless Configuration -->
+    <div class="alert alert-info">
+        {% blocktrans trimmed %}
+            The GoCardless Secret Key is encrypted at rest and never shown again after saving.
+            Leave the Secret Key field blank to keep the current key.
+        {% endblocktrans %}
+    </div>
+
     <div>
-        <!-- GoCardless Tab -->
         <div id="gocardless">
             <div class="panel panel-default">
                 <div class="panel-heading">
                     <h3 class="panel-title">{% trans "GoCardless Configuration" %}</h3>
                 </div>
                 <div class="panel-body">
-                    <form action="" method="post" class="form-horizontal">
+                    <form action="" method="post" class="form-horizontal" autocomplete="off">
                         {% csrf_token %}
                         <input type="hidden" name="tab" value="gocardless">
                         <fieldset>
@@ -42,6 +47,7 @@
                                 <div class="col-md-9">
                                     <input type="text" name="gocardless_client_id" class="form-control" 
                                            value="{{ gocardless_client_id }}" 
+                                           autocomplete="off"
                                            placeholder="{% trans 'Enter your GoCardless Secret ID' %}">
                                     <p class="help-block">{% trans "Your GoCardless Secret ID from the User Secrets section in the Bank Account Data portal" %}</p>
                                 </div>
@@ -51,9 +57,16 @@
                                 <label class="col-md-3 control-label">{% trans "Client Secret (Secret Key)" %}</label>
                                 <div class="col-md-9">
                                     <input type="password" name="gocardless_client_secret" class="form-control" 
-                                           value="{{ gocardless_client_secret }}" 
-                                           placeholder="{% trans 'Enter your GoCardless Secret Key' %}">
-                                    <p class="help-block">{% trans "Your GoCardless Secret Key from the User Secrets section" %}</p>
+                                           value=""
+                                           autocomplete="new-password"
+                                           placeholder="{% if secret_configured %}{% trans '••••••••  (leave blank to keep current key)' %}{% else %}{% trans 'Enter your GoCardless Secret Key' %}{% endif %}">
+                                    <p class="help-block">
+                                        {% if secret_configured %}
+                                            {% trans "A Secret Key is already stored (encrypted). Enter a new value only to replace it." %}
+                                        {% else %}
+                                            {% trans "Your GoCardless Secret Key from the User Secrets section" %}
+                                        {% endif %}
+                                    </p>
                                 </div>
                             </div>
 

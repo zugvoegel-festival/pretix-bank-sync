@@ -410,8 +410,12 @@ class GoCardlessService:
         reference = " ".join(filter(None, [remittance_structured, remittance_unstructured]))
 
         # Extract party information
-        debtor_account = transaction_data.get("debtorAccount", {})
-        creditor_account = transaction_data.get("creditorAccount", {})
+        from .redact import mask_iban, redact_sensitive_payload
+
+        debtor_account = transaction_data.get("debtorAccount", {}) or {}
+        creditor_account = transaction_data.get("creditorAccount", {}) or {}
+        debtor_iban = debtor_account.get("iban", "") or ""
+        creditor_iban = creditor_account.get("iban", "") or ""
 
         return {
             "transaction_id": transaction_data.get("transactionId", ""),
@@ -424,8 +428,9 @@ class GoCardlessService:
             "remittance_information_structured": remittance_structured,
             "reference": reference,
             "debtor_name": transaction_data.get("debtorName", ""),
-            "debtor_account_iban": debtor_account.get("iban", ""),
+            # Store masked IBANs only — full values stay at GoCardless
+            "debtor_account_iban": mask_iban(debtor_iban),
             "creditor_name": transaction_data.get("creditorName", ""),
-            "creditor_account_iban": creditor_account.get("iban", ""),
-            "raw_data": transaction_data,
+            "creditor_account_iban": mask_iban(creditor_iban),
+            "raw_data": redact_sensitive_payload(transaction_data),
         }

@@ -144,7 +144,7 @@
                 <ul class="list-unstyled">
                     {% for account in linked_accounts %}
                         <li>
-                            <code>{{ account.iban|default:account.id }}</code>
+                            <code>{{ account.iban_masked|default:account.id }}</code>
                             {% if account.name %} — {{ account.name }}{% endif %}
                             {% if account.currency %} ({{ account.currency }}){% endif %}
                         </li>

@@ -229,7 +229,7 @@ class BankTransaction(LoggedModel):
     debtor_account_iban = models.CharField(
         max_length=34,
         blank=True,
-        help_text=_("Debtor IBAN")
+        help_text=_("Debtor IBAN (masked at rest)")
     )
     creditor_name = models.CharField(
         max_length=255,
@@ -239,7 +239,7 @@ class BankTransaction(LoggedModel):
     creditor_account_iban = models.CharField(
         max_length=34,
         blank=True,
-        help_text=_("Creditor IBAN")
+        help_text=_("Creditor IBAN (masked at rest)")
     )
 
     # Matching state
@@ -288,7 +288,7 @@ class BankTransaction(LoggedModel):
     # Metadata
     raw_data = models.JSONField(
         default=dict,
-        help_text=_("Raw transaction data from GoCardless")
+        help_text=_("Raw transaction data from GoCardless (IBANs redacted)")
     )
 
     created = models.DateTimeField(auto_now_add=True)
@@ -333,6 +333,16 @@ class BankTransaction(LoggedModel):
         # For outgoing payments, creditor_name is the recipient
         # We'll use debtor_name as default for matching
         return self.debtor_name or self.creditor_name
+
+    @property
+    def masked_debtor_iban(self):
+        from .services.redact import mask_iban
+        return mask_iban(self.debtor_account_iban)
+
+    @property
+    def masked_creditor_iban(self):
+        from .services.redact import mask_iban
+        return mask_iban(self.creditor_account_iban)
 
 
 class TransactionMatchSuggestion(LoggedModel):
