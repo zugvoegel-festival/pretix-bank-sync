@@ -542,14 +542,22 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                 messages.error(request, _('Secret Key is required.'))
                 return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=credentials")
             
-            set_gocardless_credentials(
-                organizer,
-                client_id=client_id,
-                client_secret=client_secret if client_secret else None,
-                redirect_uri=redirect_uri,
-            )
+            try:
+                set_gocardless_credentials(
+                    organizer,
+                    client_id=client_id,
+                    client_secret=client_secret if client_secret else None,
+                    redirect_uri=redirect_uri,
+                )
+            except Exception:
+                logger.exception("Failed to save GoCardless credentials in wizard")
+                messages.error(
+                    request,
+                    _('Could not save credentials. Please try again or contact support.'),
+                )
+                return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=credentials")
             request.session.pop('wizard_credentials', None)
-            
+
             messages.success(request, _('Credentials saved successfully.'))
             return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=select_country")
         
@@ -761,14 +769,22 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
             client_secret = request.POST.get('gocardless_client_secret', '').strip()
             auto_confirm = request.POST.get('auto_confirm') == 'on'
             
-            # Empty secret field = keep existing encrypted secret
-            set_gocardless_credentials(
-                organizer,
-                client_id=client_id,
-                client_secret=client_secret if client_secret else None,
-            )
-            organizer.settings.set('pretix_bank_sync_auto_confirm', auto_confirm)
-            
+            try:
+                # Empty secret field = keep existing encrypted secret
+                set_gocardless_credentials(
+                    organizer,
+                    client_id=client_id,
+                    client_secret=client_secret if client_secret else None,
+                )
+                organizer.settings.set('pretix_bank_sync_auto_confirm', auto_confirm)
+            except Exception:
+                logger.exception("Failed to save GoCardless credentials")
+                messages.error(
+                    request,
+                    _('Could not save GoCardless credentials. Please try again or contact support.'),
+                )
+                return redirect(f"{reverse('plugins:pretix_bank_sync:settings', kwargs={'organizer': organizer.slug})}?tab=gocardless")
+
             messages.success(request, _('GoCardless settings saved successfully.'))
             return redirect(f"{reverse('plugins:pretix_bank_sync:settings', kwargs={'organizer': organizer.slug})}?tab=gocardless")
         

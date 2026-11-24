@@ -1,15 +1,12 @@
 {% extends "pretixcontrol/base.html" %}
 {% load i18n %}
 {% load static %}
-{% load compress %}
 
 {% block title %}{% trans "Bank connection setup" %}{% endblock %}
 
 {% block custom_header %}
     {{ block.super }}
-    {% compress css %}
-        <link rel="stylesheet" type="text/x-scss" href="{% static "pretix_bank_sync/scss/bank_sync_common.scss" %}" />
-    {% endcompress %}
+    <link rel="stylesheet" type="text/css" href="{% static "pretix_bank_sync/css/bank_sync_common.css" %}" />
 {% endblock %}
 
 {% block content %}
