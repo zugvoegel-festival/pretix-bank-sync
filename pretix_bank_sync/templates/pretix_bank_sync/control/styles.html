@@ -1,7 +1,4 @@
-{# Inline styles — do NOT use {% static %} / {% compress %}.
-   Pretix Nix builds use ManifestStaticFilesStorage; plugin CSS is often
-   missing from staticfiles.json after thin plugin bumps, which raises
-   ValueError → HTTP 500 on every bank-sync page. #}
+{# Inline CSS: avoid static/compress (manifest misses break pages). #}
 <style>
 .bank-sync-margin-bottom { margin-bottom: 15px; }
 .bank-sync-stats { margin-bottom: 20px; }
