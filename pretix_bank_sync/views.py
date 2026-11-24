@@ -37,6 +37,42 @@ from .tasks import approve_match_suggestion, _handle_transaction
 logger = logging.getLogger(__name__)
 
 
+def _normalize_institutions(institutions) -> list:
+    """Reduce GoCardless institution payloads to {id, name, bic} for session/templates."""
+    result = []
+    for inst in institutions or []:
+        if isinstance(inst, dict):
+            inst_id = inst.get('id') or inst.get('bic') or ''
+            name = inst.get('name') or ''
+            bic = inst.get('bic') or ''
+        else:
+            inst_id = getattr(inst, 'id', None) or getattr(inst, 'bic', '') or ''
+            name = getattr(inst, 'name', '') or ''
+            bic = getattr(inst, 'bic', '') or ''
+        if not inst_id or not name:
+            continue
+        result.append({'id': str(inst_id), 'name': str(name), 'bic': str(bic)})
+    result.sort(key=lambda x: x['name'].lower())
+    return result
+
+
+def _fetch_institutions_for_organizer(organizer, country: str) -> list:
+    """Fetch and normalize institutions for a country; raises on API failure."""
+    client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
+    if not client_id or not client_secret:
+        return []
+    callback_url = build_absolute_uri(
+        'plugins:pretix_bank_sync:callback',
+        kwargs={'organizer': organizer.slug},
+    )
+    service = GoCardlessService(
+        client_id=client_id,
+        client_secret=client_secret,
+        redirect_uri=redirect_uri or callback_url,
+    )
+    return _normalize_institutions(service.list_institutions(country=country))
+
+
 def get_bank_setup_steps(current_step_key=None, connection=None):
     """
     Get the steps for the bank setup wizard.
@@ -371,28 +407,33 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             selected_country = self.request.session.get('gocardless_selected_country', '')
             ctx['selected_country'] = selected_country
         
-        elif step == 'select_bank' and client_id and has_secret:
-            # Get selected country from session
+        elif step == 'select_bank':
+            # pretix CSP blocks inline scripts (script-src is static-only), so banks
+            # must be server-rendered into <option>s — never filled by page JS.
             selected_country = self.request.session.get('gocardless_selected_country', '')
             ctx['selected_country'] = selected_country
-            
-            # Get preloaded institutions from session if available
-            preloaded_institutions = self.request.session.get('gocardless_institutions', [])
-            logger.info(f"Retrieved {len(preloaded_institutions)} preloaded institutions from session for bank selection step")
-            
-            # Convert to JSON-serializable format and ensure it's a string
-            if preloaded_institutions:
+            institutions = _normalize_institutions(
+                self.request.session.get('gocardless_institutions', [])
+            )
+            if selected_country and not institutions and client_id and has_secret:
                 try:
-                    ctx['preloaded_institutions_json'] = json.dumps(preloaded_institutions)
-                    logger.debug(f"Serialized {len(preloaded_institutions)} institutions to JSON")
-                    logger.debug(f"First institution sample: {preloaded_institutions[0] if preloaded_institutions else 'none'}")
-                except Exception as e:
-                    logger.error(f"Error serializing institutions to JSON: {e}")
-                    ctx['preloaded_institutions_json'] = '[]'
-            else:
-                ctx['preloaded_institutions_json'] = '[]'
-                logger.debug("No preloaded institutions found in session")
-        
+                    institutions = _fetch_institutions_for_organizer(organizer, selected_country)
+                    self.request.session['gocardless_institutions'] = institutions
+                    logger.info(
+                        "Fetched %s institutions for country %s on select_bank GET",
+                        len(institutions),
+                        selected_country,
+                    )
+                except Exception:
+                    logger.exception("Error loading banks on select_bank GET")
+                    ctx['institutions_error'] = _(
+                        'Could not load banks from GoCardless. Go back and select the country again.'
+                    )
+            ctx['institutions'] = institutions
+            ctx['selected_institution'] = self.request.session.get(
+                'gocardless_selected_institution', ''
+            )
+
         elif step == 'create_requisition':
             # Show selected institution from session
             selected_institution = self.request.session.get('gocardless_selected_institution')
@@ -573,57 +614,36 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             # Store selected country in session
             request.session['gocardless_selected_country'] = country
             
-            # Preload banks for the selected country
-            client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
-            
+            # Preload slim bank list into session for the next (server-rendered) step
+            client_id, client_secret, _redirect_uri = get_gocardless_credentials(organizer)
+
             if client_id and client_secret:
                 try:
-                    callback_url = build_absolute_uri(
-                        'plugins:pretix_bank_sync:callback',
-                        kwargs={'organizer': organizer.slug}
-                    )
-                    
-                    service = GoCardlessService(
-                        client_id=client_id,
-                        client_secret=client_secret,
-                        redirect_uri=redirect_uri or callback_url,
-                    )
-                    
-                    # Fetch institutions for the selected country
-                    institutions = service.list_institutions(country=country)
-                    logger.info(f"Fetched {len(institutions)} institutions for country {country}")
-                    
-                    # Ensure institutions are JSON-serializable (convert to list of dicts if needed)
-                    institutions_list = []
-                    for inst in institutions:
-                        if isinstance(inst, dict):
-                            institutions_list.append(inst)
-                            logger.debug(f"Institution (dict): {inst.get('id', 'no-id')} - {inst.get('name', 'no-name')}")
-                        else:
-                            # Convert object to dict
-                            inst_dict = {
-                                'id': getattr(inst, 'id', getattr(inst, 'bic', '')),
-                                'name': getattr(inst, 'name', ''),
-                                'bic': getattr(inst, 'bic', ''),
-                            }
-                            institutions_list.append(inst_dict)
-                            logger.debug(f"Institution (object): {inst_dict['id']} - {inst_dict['name']}")
-                    
-                    logger.info(f"Converted {len(institutions_list)} institutions to list format")
-                    
-                    # Store institutions in session for the next step
+                    institutions_list = _fetch_institutions_for_organizer(organizer, country)
                     request.session['gocardless_institutions'] = institutions_list
-                    logger.info(f"Stored {len(institutions_list)} institutions in session")
-                    messages.success(request, _('Country selected. {} banks found. Now choose your bank...').format(len(institutions_list)))
+                    logger.info(
+                        "Stored %s institutions in session for country %s",
+                        len(institutions_list),
+                        country,
+                    )
+                    messages.success(
+                        request,
+                        _('Country selected. {} banks found. Now choose your bank...').format(
+                            len(institutions_list)
+                        ),
+                    )
                 except Exception as e:
                     logger.exception("Error loading banks for country")
-                    messages.warning(request, _('Country selected, but failed to load banks: {}').format(str(e)))
-                    # Still proceed to bank selection - it will load via AJAX
+                    request.session.pop('gocardless_institutions', None)
+                    messages.warning(
+                        request,
+                        _('Country selected, but failed to load banks: {}').format(str(e)),
+                    )
             else:
+                request.session.pop('gocardless_institutions', None)
                 messages.success(request, _('Country selected. Now choose your bank...'))
-            
-            return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=select_bank")
-        
+
+            return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=select_bank")        
         elif step == 'select_bank':
             institution_id = request.POST.get('institution_id', '').strip()
             country = request.session.get('gocardless_selected_country', '')
@@ -1246,44 +1266,22 @@ class BankInstitutionsAjaxView(OrganizerPermissionRequiredMixin, View):
                 redirect_uri=redirect_uri or callback_url
             )
             
-            institutions = service.list_institutions(country=country)
-            
-            # Format for Select2
+            institutions = _normalize_institutions(service.list_institutions(country=country))
             results = []
             for inst in institutions:
-                # Handle both dict and object-like structures
-                if isinstance(inst, dict):
-                    inst_id = inst.get('id', inst.get('bic', ''))
-                    inst_name = inst.get('name', '')
-                    inst_bic = inst.get('bic', '')
-                else:
-                    # If it's an object with attributes
-                    inst_id = getattr(inst, 'id', getattr(inst, 'bic', ''))
-                    inst_name = getattr(inst, 'name', '')
-                    inst_bic = getattr(inst, 'bic', '')
-                
-                if not inst_id or not inst_name:
-                    continue
-                
-                # Filter by query if provided
                 if query:
-                    if query not in inst_name.lower() and query not in (inst_bic or '').lower():
+                    if query not in inst['name'].lower() and query not in (inst['bic'] or '').lower():
                         continue
-                
-                display_name = inst_name
-                if inst_bic:
-                    display_name = f"{inst_name} ({inst_bic})"
-                
+                display_name = inst['name']
+                if inst['bic']:
+                    display_name = f"{inst['name']} ({inst['bic']})"
                 results.append({
-                    'id': inst_id,
+                    'id': inst['id'],
                     'text': display_name,
-                    'name': inst_name,
-                    'bic': inst_bic,
+                    'name': inst['name'],
+                    'bic': inst['bic'],
                 })
-            
-            # Sort by name
-            results.sort(key=lambda x: x['name'])
-            
+
             return JsonResponse({
                 'results': results,
                 'pagination': {
