@@ -3,8 +3,9 @@ GoCardless Bank Account Data API service.
 
 Handles OAuth flow, API calls, and transaction fetching with rate-limit awareness.
 """
+import hashlib
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional
 
@@ -342,7 +343,8 @@ class GoCardlessService:
         self,
         account_id: str,
         date_from: Optional[datetime] = None,
-        date_to: Optional[datetime] = None
+        date_to: Optional[datetime] = None,
+        include_pending: bool = False,
     ) -> List[Dict]:
         """
         Get transactions for an account.
@@ -351,9 +353,10 @@ class GoCardlessService:
             account_id: The account ID
             date_from: Start date (default: 90 days ago)
             date_to: End date (default: today)
+            include_pending: Also return pending txs (may lack stable IDs)
 
         Returns:
-            List of transaction data
+            List of transaction data (booked first; pending tagged with _pending)
         """
         if date_from is None:
             date_from = now() - timedelta(days=90)
@@ -373,7 +376,22 @@ class GoCardlessService:
                 scope="transactions",
             )
             data = response.json()
-            return data.get("transactions", {}).get("booked", [])
+            tx_block = data.get("transactions") or {}
+            booked = list(tx_block.get("booked") or [])
+            pending = list(tx_block.get("pending") or [])
+            logger.info(
+                "GoCardless account %s: %s booked, %s pending transactions",
+                account_id,
+                len(booked),
+                len(pending),
+            )
+            if include_pending:
+                for p in pending:
+                    if isinstance(p, dict):
+                        p = dict(p)
+                        p["_pending"] = True
+                        booked.append(p)
+            return booked
         except RateLimitExceeded:
             raise
         except requests.RequestException as e:
@@ -397,6 +415,66 @@ class GoCardlessService:
             "expires_at": requisition.get("expires_at"),
         }
 
+    @staticmethod
+    def _as_text(value) -> str:
+        """Coerce GoCardless remittance / ID fields that may be str, list, or blank."""
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (list, tuple)):
+            parts = [GoCardlessService._as_text(v) for v in value]
+            return " ".join(p for p in parts if p)
+        return str(value).strip()
+
+    @staticmethod
+    def _parse_date(value) -> Optional[date]:
+        text = GoCardlessService._as_text(value)
+        if not text:
+            return None
+        # bookingDateTime / valueDateTime → take date part
+        if "T" in text:
+            text = text.split("T", 1)[0]
+        try:
+            return datetime.strptime(text, "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return None
+
+    def resolve_transaction_id(self, transaction_data: Dict, account_id: str) -> str:
+        """
+        Stable unique id for a booked transaction.
+
+        Many banks (esp. DE) omit ``transactionId``. Prefer bank id, then
+        GoCardless ``internalTransactionId`` (scoped to account), then
+        ``entryReference``, then a deterministic content hash.
+        """
+        bank_id = self._as_text(transaction_data.get("transactionId"))
+        if bank_id:
+            return bank_id
+
+        internal = self._as_text(transaction_data.get("internalTransactionId"))
+        if internal:
+            # internalTransactionId is only unique within one account
+            return f"{account_id}:gc:{internal}"
+
+        entry = self._as_text(transaction_data.get("entryReference"))
+        if entry:
+            return f"{account_id}:entry:{entry}"
+
+        # Last resort — avoid skipping the row entirely
+        amount = (transaction_data.get("transactionAmount") or {}).get("amount", "")
+        currency = (transaction_data.get("transactionAmount") or {}).get("currency", "")
+        date = (
+            self._as_text(transaction_data.get("bookingDate"))
+            or self._as_text(transaction_data.get("valueDate"))
+        )
+        remittance = self._as_text(
+            transaction_data.get("remittanceInformationUnstructured")
+        ) or self._as_text(transaction_data.get("remittanceInformationStructured"))
+        blob = f"{account_id}|{date}|{amount}|{currency}|{remittance}"
+        digest = hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+        return f"{account_id}:hash:{digest}"
+
     def normalize_transaction(self, transaction_data: Dict, account_id: str) -> Dict:
         """
         Normalize transaction data from GoCardless format.
@@ -409,35 +487,28 @@ class GoCardlessService:
             Normalized transaction data
         """
         # Extract amount
-        amount_str = transaction_data.get("transactionAmount", {}).get("amount", "0")
-        amount = Decimal(amount_str)
+        amount_obj = transaction_data.get("transactionAmount") or {}
+        amount_str = amount_obj.get("amount", "0") or "0"
+        amount = Decimal(str(amount_str))
 
         # Extract currency
-        currency = transaction_data.get("transactionAmount", {}).get("currency", "")
+        currency = self._as_text(amount_obj.get("currency"))
 
-        # Extract dates
-        date_str = transaction_data.get("bookingDate") or transaction_data.get("valueDate", "")
-        date = None
-        if date_str:
-            try:
-                date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            except (ValueError, TypeError):
-                pass
+        booking_date = self._parse_date(transaction_data.get("bookingDate"))
+        value_date = self._parse_date(transaction_data.get("valueDate"))
+        # date is required on the model — never leave it None
+        date = booking_date or value_date or now().date()
 
-        booking_date_str = transaction_data.get("bookingDate", "")
-        booking_date = None
-        if booking_date_str:
-            try:
-                booking_date = datetime.strptime(booking_date_str, "%Y-%m-%d").date()
-            except (ValueError, TypeError):
-                pass
+        remittance_unstructured = self._as_text(
+            transaction_data.get("remittanceInformationUnstructured")
+        ) or self._as_text(transaction_data.get("remittanceInformationUnstructuredArray"))
+        remittance_structured = self._as_text(
+            transaction_data.get("remittanceInformationStructured")
+        ) or self._as_text(transaction_data.get("remittanceInformationStructuredArray"))
+        reference = " ".join(
+            p for p in (remittance_structured, remittance_unstructured) if p
+        )
 
-        # Extract remittance information
-        remittance_unstructured = transaction_data.get("remittanceInformationUnstructured", "")
-        remittance_structured = transaction_data.get("remittanceInformationStructured", "")
-        reference = " ".join(filter(None, [remittance_structured, remittance_unstructured]))
-
-        # Extract party information
         from .redact import mask_iban, redact_sensitive_payload
 
         debtor_account = transaction_data.get("debtorAccount", {}) or {}
@@ -446,7 +517,7 @@ class GoCardlessService:
         creditor_iban = creditor_account.get("iban", "") or ""
 
         return {
-            "transaction_id": transaction_data.get("transactionId", ""),
+            "transaction_id": self.resolve_transaction_id(transaction_data, account_id),
             "account_id": account_id,
             "amount": amount,
             "currency": currency,
@@ -455,10 +526,10 @@ class GoCardlessService:
             "remittance_information_unstructured": remittance_unstructured,
             "remittance_information_structured": remittance_structured,
             "reference": reference,
-            "debtor_name": transaction_data.get("debtorName", ""),
+            "debtor_name": self._as_text(transaction_data.get("debtorName")),
             # Store masked IBANs only — full values stay at GoCardless
             "debtor_account_iban": mask_iban(debtor_iban),
-            "creditor_name": transaction_data.get("creditorName", ""),
+            "creditor_name": self._as_text(transaction_data.get("creditorName")),
             "creditor_account_iban": mask_iban(creditor_iban),
             "raw_data": redact_sensitive_payload(transaction_data),
         }

@@ -979,6 +979,10 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
             # Get transactions for each account
             new_transactions = []
             fetched_any = False
+            total_api = 0
+            total_skipped_no_id = 0
+            total_duplicates = 0
+            total_errors = 0
             for account_id in account_ids:
                 if not account_id:
                     continue
@@ -986,27 +990,44 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
                 try:
                     transactions = service.get_transactions(account_id)
                     fetched_any = True
+                    total_api += len(transactions)
                     for tx_data in transactions:
-                        # Normalize transaction
-                        normalized = service.normalize_transaction(tx_data, account_id)
+                        try:
+                            normalized = service.normalize_transaction(tx_data, account_id)
+                        except Exception:
+                            total_errors += 1
+                            logger.exception(
+                                "Failed to normalize transaction for account %s",
+                                account_id,
+                            )
+                            continue
 
-                        # Check if transaction already exists
-                        transaction_id = normalized.get('transaction_id')
+                        transaction_id = (normalized.get('transaction_id') or '').strip()
                         if not transaction_id:
+                            total_skipped_no_id += 1
                             continue
 
                         if BankTransaction.objects.filter(
                             transaction_id=transaction_id
                         ).exists():
+                            total_duplicates += 1
                             continue
 
-                        # Create transaction record
-                        trans = BankTransaction(
-                            connection=connection,
-                            **normalized
-                        )
-                        trans.save()
-                        new_transactions.append(trans)
+                        try:
+                            trans = BankTransaction(
+                                connection=connection,
+                                **normalized
+                            )
+                            trans.save()
+                            new_transactions.append(trans)
+                        except Exception:
+                            total_errors += 1
+                            logger.exception(
+                                "Failed to save transaction %s for account %s",
+                                transaction_id,
+                                account_id,
+                            )
+                            continue
 
                 except RateLimitExceeded as e:
                     until = now() + e.retry_after
@@ -1030,6 +1051,16 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
                 connection.record_sync_success()
             else:
                 logger.warning(f"No transaction fetches succeeded for connection {connection_id}")
+
+            logger.info(
+                "Sync connection %s: api=%s new=%s duplicates=%s skipped_no_id=%s errors=%s",
+                connection_id,
+                total_api,
+                len(new_transactions),
+                total_duplicates,
+                total_skipped_no_id,
+                total_errors,
+            )
 
             # Match new transactions
             if new_transactions:
