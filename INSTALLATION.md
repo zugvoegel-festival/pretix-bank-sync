@@ -62,7 +62,7 @@ Sign up for Bank Account Data at https://bankaccountdata.gocardless.com/
 ### Plugin not appearing in the list
 
 - `pip list | grep pretix-bank-sync`
-- Confirm entry point: `pretix_bank_sync.apps:PluginApp` in `pyproject.toml`
+- Confirm entry point module is the app package (`pretix_bank_sync:…`) in `pyproject.toml`
 - Restart pretix web and Celery
 
 ### Callback fails after bank authorization

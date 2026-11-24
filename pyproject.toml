@@ -18,7 +18,11 @@ dependencies = [
 ]
 
 [project.entry-points."pretix.plugin"]
-pretix_bank_sync = "pretix_bank_sync.apps:PluginApp"
+# Module must be the app package (pretix_bank_sync), not pretix_bank_sync.apps.
+# pretix appends entry_point.module to INSTALLED_APPS; Django then auto-loads
+# apps.PluginApp. Using pretix_bank_sync.apps made Django treat that module as
+# a plain AppConfig with no PretixPluginMeta, so the plugin never appeared.
+pretix_bank_sync = "pretix_bank_sync:PluginApp"
 
 [project.entry-points."distutils.commands"]
 build = "pretix_plugin_build.build:CustomBuild"

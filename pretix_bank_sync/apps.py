@@ -10,7 +10,6 @@ except ImportError:
 class PluginApp(PluginConfig):
     name = "pretix_bank_sync"
     verbose_name = "Bank Sync"
-    level = PLUGIN_LEVEL_ORGANIZER
 
     class PretixPluginMeta:
         name = gettext_lazy("Bank Sync")
@@ -20,6 +19,9 @@ class PluginApp(PluginConfig):
         version = __version__
         category = "INTEGRATION"
         compatibility = "pretix>=2.7.0"
+        # Must live on PretixPluginMeta — pretix defaults missing level to EVENT
+        # and the organizer plugins page only enables ORGANIZER / HYBRID plugins.
+        level = PLUGIN_LEVEL_ORGANIZER
 
     def ready(self):
         from . import signals  # NOQA
