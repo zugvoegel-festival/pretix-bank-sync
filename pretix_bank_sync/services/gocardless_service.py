@@ -1,17 +1,18 @@
 """
 GoCardless Bank Account Data API service.
 
-Handles OAuth flow, API calls, and transaction fetching.
+Handles OAuth flow, API calls, and transaction fetching with rate-limit awareness.
 """
 import logging
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional
-from urllib.parse import urlencode
 
 import requests
-from django.conf import settings
+from django.core.cache import cache
 from django.utils.timezone import now
+
+from .rate_limit import TOKEN_CACHE_SECONDS, RateLimitExceeded, parse_reset_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +38,26 @@ class GoCardlessService:
         self.client_secret = client_secret
         self.redirect_uri = redirect_uri
         self.base_url = self.BASE_URL
+        self._access_token: Optional[str] = None
+
+    def _token_cache_key(self) -> str:
+        return f"pretix_bank_sync:gc_token:{self.client_id}"
 
     def _get_access_token(self) -> Optional[str]:
         """
-        Get access token using client credentials.
+        Get access token using client credentials (cached).
 
         Returns:
             Access token or None if authentication fails
         """
+        if self._access_token:
+            return self._access_token
+
+        cached = cache.get(self._token_cache_key())
+        if cached:
+            self._access_token = cached
+            return cached
+
         url = f"{self.base_url}/token/new/"
         data = {
             "secret_id": self.client_id,
@@ -58,22 +71,78 @@ class GoCardlessService:
             access_token = token_data.get("access")
             if not access_token:
                 logger.error("GoCardless API returned no access token in response")
+                return None
+            self._access_token = access_token
+            # Prefer API-reported expiry when present; otherwise use conservative TTL.
+            expires_in = token_data.get("access_expires") or token_data.get("expires_in")
+            try:
+                ttl = min(TOKEN_CACHE_SECONDS, max(60, int(expires_in) - 60)) if expires_in else TOKEN_CACHE_SECONDS
+            except (TypeError, ValueError):
+                ttl = TOKEN_CACHE_SECONDS
+            cache.set(self._token_cache_key(), access_token, timeout=ttl)
             return access_token
         except requests.HTTPError as e:
-            # Log detailed error information for debugging
             error_detail = ""
             try:
                 error_data = response.json()
                 error_detail = error_data.get("detail", error_data.get("error", ""))
-            except:
+            except Exception:
                 error_detail = response.text[:200] if hasattr(response, 'text') else str(e)
             logger.error(f"Failed to get GoCardless access token (HTTP {response.status_code}): {error_detail}")
-            # Return None to maintain backward compatibility with existing code
             return None
         except requests.RequestException as e:
             logger.error(f"Failed to get GoCardless access token: {e}")
-            # Return None to maintain backward compatibility
             return None
+
+    def _raise_for_rate_limit(self, response: requests.Response, scope: Optional[str] = None):
+        if response.status_code != 429:
+            return
+        reset_seconds = parse_reset_seconds(response.headers)
+        detail = ""
+        try:
+            payload = response.json()
+            detail = payload.get("detail") or payload.get("summary") or ""
+        except Exception:
+            detail = response.text[:300] if response.text else "Rate limit exceeded"
+        raise RateLimitExceeded(
+            detail or "Rate limit exceeded",
+            reset_seconds=reset_seconds,
+            scope=scope,
+        )
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params=None,
+        json_body=None,
+        auth: bool = True,
+        scope: Optional[str] = None,
+        timeout: int = 30,
+    ) -> requests.Response:
+        """Perform an API request with auth and 429 handling."""
+        headers = {}
+        if auth:
+            access_token = self._get_access_token()
+            if not access_token:
+                raise Exception("Failed to authenticate with GoCardless")
+            headers["Authorization"] = f"Bearer {access_token}"
+        if json_body is not None:
+            headers["Content-Type"] = "application/json"
+
+        url = f"{self.base_url}{path}"
+        response = requests.request(
+            method,
+            url,
+            headers=headers,
+            params=params,
+            json=json_body,
+            timeout=timeout,
+        )
+        self._raise_for_rate_limit(response, scope=scope)
+        response.raise_for_status()
+        return response
 
     def list_institutions(self, country: Optional[str] = None) -> List[Dict]:
         """
@@ -85,21 +154,12 @@ class GoCardlessService:
         Returns:
             List of institution data
         """
-        access_token = self._get_access_token()
-        if not access_token:
-            raise Exception("Failed to authenticate with GoCardless")
-
-        url = f"{self.base_url}/institutions/"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-        }
         params = {}
         if country:
             params["country"] = country
 
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
+            response = self._request("GET", "/institutions/", params=params)
             data = response.json()
             # Handle both response formats: list directly or dict with "results" key
             if isinstance(data, list):
@@ -109,6 +169,8 @@ class GoCardlessService:
             else:
                 logger.warning(f"Unexpected response format from institutions API: {type(data)}")
                 return []
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.error(f"Failed to list institutions: {e}")
             raise Exception(f"Failed to list institutions: {e}")
@@ -130,15 +192,6 @@ class GoCardlessService:
         Returns:
             Dict with 'id' (requisition_id) and 'link' (authorization URL)
         """
-        access_token = self._get_access_token()
-        if not access_token:
-            raise Exception("Failed to authenticate with GoCardless")
-
-        url = f"{self.base_url}/requisitions/"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
         data = {
             "redirect": redirect_url,
         }
@@ -148,9 +201,10 @@ class GoCardlessService:
             data["agreement"] = agreement
 
         try:
-            response = requests.post(url, json=data, headers=headers, timeout=30)
-            response.raise_for_status()
+            response = self._request("POST", "/requisitions/", json_body=data)
             return response.json()
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.error(f"Failed to create requisition: {e}")
             raise Exception(f"Failed to create requisition: {e}")
@@ -165,37 +219,35 @@ class GoCardlessService:
         Returns:
             Requisition data
         """
-        access_token = self._get_access_token()
-        if not access_token:
-            raise Exception("Failed to authenticate with GoCardless")
-
-        url = f"{self.base_url}/requisitions/{requisition_id}/"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-        }
-
         try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
+            response = self._request("GET", f"/requisitions/{requisition_id}/")
             return response.json()
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.error(f"Failed to get requisition {requisition_id}: {e}")
             raise Exception(f"Failed to get requisition: {e}")
+
+    def list_account_ids(self, requisition_id: str) -> List[str]:
+        """
+        Return account IDs for a requisition without calling the details endpoint.
+
+        Prefer this for periodic sync — account details have a separate daily
+        bank rate-limit budget.
+        """
+        requisition = self.get_requisition(requisition_id)
+        account_ids = requisition.get("accounts") or []
+        return [str(aid) for aid in account_ids if aid]
 
     def get_agreement(self, agreement_id: str) -> Optional[Dict]:
         """Fetch an end-user agreement (includes access_valid_for_days)."""
         if not agreement_id:
             return None
-        access_token = self._get_access_token()
-        if not access_token:
-            raise Exception("Failed to authenticate with GoCardless")
-
-        url = f"{self.base_url}/agreements/enduser/{agreement_id}/"
-        headers = {"Authorization": f"Bearer {access_token}"}
         try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
+            response = self._request("GET", f"/agreements/enduser/{agreement_id}/")
             return response.json()
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.warning(f"Failed to get agreement {agreement_id}: {e}")
             return None
@@ -215,36 +267,20 @@ class GoCardlessService:
 
     def get_accounts(self, requisition_id: str) -> List[Dict]:
         """
-        Get accounts for a requisition.
+        Get accounts for a requisition (includes details — costly for rate limits).
 
-        Args:
-            requisition_id: The requisition ID
-
-        Returns:
-            List of account data
+        Prefer ``list_account_ids`` for sync. Use this only for setup/wizard UX.
         """
-        access_token = self._get_access_token()
-        if not access_token:
-            raise Exception("Failed to authenticate with GoCardless")
-
-        url = f"{self.base_url}/requisitions/{requisition_id}/"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-        }
-
         try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
-            requisition_data = response.json()
-            account_ids = requisition_data.get("accounts", [])
-
+            account_ids = self.list_account_ids(requisition_id)
             accounts = []
             for account_id in account_ids:
                 account_data = self.get_account_details(account_id)
                 if account_data:
                     accounts.append(account_data)
-
             return accounts
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.error(f"Failed to get accounts for requisition {requisition_id}: {e}")
             raise Exception(f"Failed to get accounts: {e}")
@@ -259,19 +295,15 @@ class GoCardlessService:
         Returns:
             Account data or None
         """
-        access_token = self._get_access_token()
-        if not access_token:
-            return None
-
-        url = f"{self.base_url}/accounts/{account_id}/"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-        }
-
         try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
+            response = self._request(
+                "GET",
+                f"/accounts/{account_id}/",
+                scope="details",
+            )
             return response.json()
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.error(f"Failed to get account {account_id}: {e}")
             return None
@@ -290,20 +322,16 @@ class GoCardlessService:
             - referenceDate: Date of the balance
             - creditLimitIncluded: Boolean indicating if credit limit is included
         """
-        access_token = self._get_access_token()
-        if not access_token:
-            raise Exception("Failed to authenticate with GoCardless")
-
-        url = f"{self.base_url}/accounts/{account_id}/balances/"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-        }
-
         try:
-            response = requests.get(url, headers=headers, timeout=30)
-            response.raise_for_status()
+            response = self._request(
+                "GET",
+                f"/accounts/{account_id}/balances/",
+                scope="balances",
+            )
             data = response.json()
             return data.get("balances", [])
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.error(f"Failed to get balances for account {account_id}: {e}")
             raise Exception(f"Failed to get balances: {e}")
@@ -325,29 +353,27 @@ class GoCardlessService:
         Returns:
             List of transaction data
         """
-        access_token = self._get_access_token()
-        if not access_token:
-            raise Exception("Failed to authenticate with GoCardless")
-
         if date_from is None:
             date_from = now() - timedelta(days=90)
         if date_to is None:
             date_to = now()
 
-        url = f"{self.base_url}/accounts/{account_id}/transactions/"
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-        }
         params = {
             "date_from": date_from.strftime("%Y-%m-%d"),
             "date_to": date_to.strftime("%Y-%m-%d"),
         }
 
         try:
-            response = requests.get(url, headers=headers, params=params, timeout=30)
-            response.raise_for_status()
+            response = self._request(
+                "GET",
+                f"/accounts/{account_id}/transactions/",
+                params=params,
+                scope="transactions",
+            )
             data = response.json()
             return data.get("transactions", {}).get("booked", [])
+        except RateLimitExceeded:
+            raise
         except requests.RequestException as e:
             logger.error(f"Failed to get transactions for account {account_id}: {e}")
             raise Exception(f"Failed to get transactions: {e}")

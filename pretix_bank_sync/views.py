@@ -30,6 +30,7 @@ from .services.credentials import (
     set_gocardless_credentials,
     secret_is_configured,
 )
+from .services.rate_limit import MAX_SYNCS_PER_DAY, RateLimitExceeded
 from .services.redact import mask_iban
 from .tasks import approve_match_suggestion, _handle_transaction
 
@@ -147,33 +148,39 @@ class BankConnectionsListView(OrganizerPermissionRequiredMixin, ListView):
         }
         
         # Prefer a single connection per organizer; surface accounts + expiry UX
+        # Do NOT live-fetch account details here — that burns the daily bank API budget.
         primary = connections.first()
         linked_accounts = []
         expiring_soon = False
-        if primary and primary.status == BankConnection.STATUS_ACTIVE:
-            expiring_soon = primary.is_expiring_soon(within_days=7)
-            client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
-            if client_id and client_secret and primary.requisition_id:
-                try:
-                    callback_url = build_absolute_uri(
-                        'plugins:pretix_bank_sync:callback',
-                        kwargs={'organizer': organizer.slug},
-                    )
-                    service = GoCardlessService(
-                        client_id=client_id,
-                        client_secret=client_secret,
-                        redirect_uri=redirect_uri or callback_url,
-                    )
-                    accounts = service.get_accounts(primary.requisition_id) or []
-                    linked_accounts = []
-                    for account in accounts:
-                        account = dict(account)
-                        if account.get('iban'):
-                            account['iban_masked'] = mask_iban(account.get('iban', ''))
-                            account.pop('iban', None)
-                        linked_accounts.append(account)
-                except Exception:
-                    logger.exception("Failed to load linked accounts for connection list")
+        can_manual_sync = False
+        sync_block_reason = ""
+        if primary:
+            primary.reset_daily_counter()
+            if primary.status == BankConnection.STATUS_ACTIVE:
+                expiring_soon = primary.is_expiring_soon(within_days=7)
+                can_manual_sync = primary.can_sync(force=True)
+                sync_block_reason = primary.sync_block_reason(force=True)
+            # Build linked account list from cached IDs + any masked IBANs we already store
+            account_ids = list(primary.account_ids or [])
+            if not account_ids:
+                account_ids = list(
+                    BankTransaction.objects.filter(connection=primary)
+                    .values_list('account_id', flat=True)
+                    .distinct()
+                )
+            iban_by_account = {}
+            for row in (
+                BankTransaction.objects.filter(connection=primary)
+                .exclude(creditor_account_iban='')
+                .values('account_id', 'creditor_account_iban')
+                .distinct()
+            ):
+                iban_by_account.setdefault(row['account_id'], row['creditor_account_iban'])
+            for account_id in account_ids:
+                linked_accounts.append({
+                    'id': account_id,
+                    'iban_masked': mask_iban(iban_by_account.get(account_id, '')),
+                })
 
         pending_review = BankTransaction.objects.filter(
             connection__organizer=organizer,
@@ -195,6 +202,9 @@ class BankConnectionsListView(OrganizerPermissionRequiredMixin, ListView):
             'expiring_soon': expiring_soon,
             'pending_review_count': pending_review,
             'single_connection_mode': True,
+            'can_manual_sync': can_manual_sync,
+            'sync_block_reason': sync_block_reason,
+            'max_syncs_per_day': MAX_SYNCS_PER_DAY,
         })
         return ctx
 
@@ -404,18 +414,31 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                 ctx['requisition'] = requisition
                 ctx['requisition_status'] = requisition.get('status', '')
                 
-                # Get accounts if available (IBANs masked for display)
-                account_ids = requisition.get('accounts', [])
+                # Prefer cached IDs; details fetch is optional and rate-limited
+                account_ids = list(connection.account_ids or []) or list(requisition.get('accounts', []) or [])
+                if account_ids and not connection.account_ids:
+                    connection.account_ids = [str(a) for a in account_ids if a]
+                    connection.save(update_fields=['account_ids'])
                 if account_ids:
                     accounts = []
-                    for account_id in account_ids:
-                        account = service.get_account_details(account_id)
-                        if account:
-                            account = dict(account)
-                            if account.get('iban'):
-                                account['iban'] = mask_iban(account.get('iban', ''))
-                            accounts.append(account)
+                    try:
+                        for account_id in account_ids:
+                            account = service.get_account_details(account_id)
+                            if account:
+                                account = dict(account)
+                                if account.get('iban'):
+                                    account['iban'] = mask_iban(account.get('iban', ''))
+                                accounts.append(account)
+                    except RateLimitExceeded:
+                        # Show IDs only when details budget is exhausted
+                        accounts = [{'id': aid} for aid in account_ids]
+                        ctx['error'] = _(
+                            'Account details are rate-limited right now; showing account IDs only.'
+                        )
                     ctx['accounts'] = accounts
+            except RateLimitExceeded as e:
+                ctx['error'] = _('Bank API rate limit exceeded. Please try again later.')
+                logger.warning(f"Rate limited verifying connection: {e}")
             except Exception as e:
                 ctx['error'] = str(e)
                 logger.exception("Error verifying connection")
@@ -428,7 +451,7 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                     redirect_uri=redirect_uri or callback_url
                 )
                 requisition = service.get_requisition(connection.requisition_id)
-                account_ids = requisition.get('accounts', [])
+                account_ids = list(connection.account_ids or []) or list(requisition.get('accounts', []) or [])
                 
                 if account_ids:
                     # Test balances on first account
@@ -443,6 +466,10 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                     ctx['test_balances'] = balances
                     ctx['test_account'] = account_details
                     ctx['test_success'] = True
+            except RateLimitExceeded as e:
+                ctx['error'] = _('Bank API rate limit exceeded during balance test. Try again later.')
+                ctx['test_success'] = False
+                logger.warning(f"Rate limited testing balances: {e}")
             except Exception as e:
                 ctx['error'] = str(e)
                 ctx['test_success'] = False
@@ -830,8 +857,14 @@ class BankSyncCallbackView(View):
                 connection.consent_expires_at = now() + timedelta(days=valid_days)
                 connection.consent_id = str(requisition.get('agreement') or connection.consent_id or '')
                 connection.last_error = ''
+                # Cache account IDs from requisition — no details/balances call
+                account_ids = [str(a) for a in (requisition.get('accounts') or []) if a]
+                if account_ids:
+                    connection.account_ids = account_ids
+                connection.rate_limited_until = None
                 connection.save(update_fields=[
-                    'status', 'consent_expires_at', 'consent_id', 'last_error'
+                    'status', 'consent_expires_at', 'consent_id', 'last_error',
+                    'account_ids', 'rate_limited_until',
                 ])
                 messages.success(request, _('Bank account connected successfully!'))
                 request.session.pop('gocardless_auth_link', None)
@@ -865,6 +898,16 @@ class BankSyncFetchTransactionsView(OrganizerPermissionRequiredMixin, View):
         if not connection or connection.status != BankConnection.STATUS_ACTIVE:
             messages.error(request, _('No active bank connection found.'))
             return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
+
+        connection.reset_daily_counter()
+        # Manual fetch may skip spacing, but still respects daily cap / 429 cooldown
+        if not connection.can_sync(force=True):
+            messages.warning(
+                request,
+                connection.sync_block_reason(force=True)
+                or _('Sync is not available right now (rate limit).'),
+            )
+            return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
         
         # Get GoCardless settings
         client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
@@ -874,12 +917,36 @@ class BankSyncFetchTransactionsView(OrganizerPermissionRequiredMixin, View):
             return redirect('plugins:pretix_bank_sync:settings', organizer=organizer.slug)
         
         try:
-            # Use the sync task (it handles GoCardless)
+            # Use the sync task (it handles GoCardless); force=True for user-initiated
             from .tasks import sync_bank_transactions
-            sync_bank_transactions(connection.id)
-            messages.success(request, _('Transaction sync initiated. New transactions will be processed shortly.'))
+            sync_bank_transactions(connection.id, force=True)
+            connection.refresh_from_db()
+            if connection.is_rate_limited():
+                messages.warning(
+                    request,
+                    _('Bank API rate limit hit. Sync paused until {when}.').format(
+                        when=connection.rate_limited_until
+                    ),
+                )
+            else:
+                remaining = connection.syncs_remaining_today()
+                messages.success(
+                    request,
+                    _('Transaction sync completed. {remaining} of {limit} syncs remaining today.').format(
+                        remaining=remaining,
+                        limit=MAX_SYNCS_PER_DAY,
+                    ),
+                )
             return redirect('plugins:pretix_bank_sync:transactions', organizer=organizer.slug)
             
+        except RateLimitExceeded as e:
+            until = now() + e.retry_after
+            connection.mark_rate_limited(until, message=str(e))
+            messages.warning(
+                request,
+                _('Bank API rate limit exceeded. Try again after {when}.').format(when=until),
+            )
+            return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
         except Exception as e:
             logger.exception("Error manually fetching transactions")
             messages.error(request, _('Error fetching transactions: {}').format(str(e)))

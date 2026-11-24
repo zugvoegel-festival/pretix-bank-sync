@@ -79,13 +79,23 @@
         {% if stats.active %}
             <form method="post" action="{% url 'plugins:pretix_bank_sync:fetch_transactions' organizer=organizer.slug %}" style="display:inline;">
                 {% csrf_token %}
-                <button type="submit" class="btn btn-default">
+                <button type="submit" class="btn btn-default" {% if not can_manual_sync %}disabled title="{{ sync_block_reason }}"{% endif %}>
                     <span class="fa fa-refresh"></span>
                     {% trans "Fetch transactions now" %}
                 </button>
             </form>
         {% endif %}
     </div>
+
+    {% if sync_block_reason %}
+        <div class="alert alert-warning">
+            {{ sync_block_reason }}
+            {% blocktrans trimmed with limit=max_syncs_per_day %}
+                Banks allow a small number of successful account data requests per day
+                (typically {{ limit }}). Automatic syncs are spaced to conserve that budget.
+            {% endblocktrans %}
+        </div>
+    {% endif %}
 
     {% if not has_credentials %}
         <div class="alert alert-warning">
@@ -192,7 +202,12 @@
                                             —
                                         {% endif %}
                                     </td>
-                                    <td>{{ connection.sync_count_today }} / 4</td>
+                                    <td>
+                                        {{ connection.sync_count_today }} / {{ max_syncs_per_day }}
+                                        {% if connection.is_rate_limited %}
+                                            <br><span class="label label-warning">{% trans "Rate limited" %}</span>
+                                        {% endif %}
+                                    </td>
                                     <td>
                                         {% if connection.consent_expires_at %}
                                             {{ connection.consent_expires_at|date:"SHORT_DATE_FORMAT" }}
@@ -218,6 +233,17 @@
                                         </a>
                                     </td>
                                 </tr>
+                                {% if connection.is_rate_limited %}
+                                    <tr class="warning">
+                                        <td colspan="7">
+                                            <small>
+                                                {% blocktrans trimmed with when=connection.rate_limited_until %}
+                                                    Bank API rate limit active until {{ when }}. Syncs will resume automatically after that.
+                                                {% endblocktrans %}
+                                            </small>
+                                        </td>
+                                    </tr>
+                                {% endif %}
                                 {% if connection.last_error %}
                                     <tr class="warning">
                                         <td colspan="7">

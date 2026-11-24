@@ -3,9 +3,15 @@ pretix Bank Sync Plugin
 
 This plugin integrates with GoCardless Bank Account Data (formerly Nordigen) to:
 
-- Sync bank account transactions up to 4 times per day
+- Sync bank account transactions up to 4 times per day (bank API rate limit)
 - Automatically match transactions to orders/payments
 - Manage bank connection lifecycle (setup, authorization, reauthorization)
+
+Rate limiting: banks often allow only ~4 successful account-data requests per day
+per access scope. The plugin spaces automatic syncs (~6 hours apart), caches
+access tokens and account IDs, uses a lean sync path (transactions only), handles
+HTTP 429 with a cooldown, and blocks overlapping syncs. Manual "Fetch now" may
+skip spacing but still respects the daily cap and any active cooldown.
 
 Installation
 ------------

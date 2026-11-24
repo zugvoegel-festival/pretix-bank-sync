@@ -76,10 +76,17 @@ Sign up for Bank Account Data at https://bankaccountdata.gocardless.com/
 python -m pretix migrate pretix_bank_sync
 ```
 
+### Sync blocked / rate limited
+
+Banks typically allow only ~4 successful account-data requests per day. The plugin
+spaces automatic syncs (~6 hours apart), caches account IDs, and pauses on HTTP 429.
+If the control panel shows “Rate limited”, wait for the cooldown — do not re-authorize
+just to reset fetches.
+
 ## Behaviour
 
 1. One bank connection per organizer (multiple accounts under that consent OK)
-2. Periodic sync runs up to 4 times per day per active connection
+2. Periodic sync runs up to 4 times per day per active connection (spaced ~6h)
 3. Prefer payment references `EVENTSLUG-ORDERCODE`; also matches order code / sender / amount
 4. High-confidence EUR event+order or exact matches auto-confirm when `pretix_bank_sync_auto_confirm` is enabled (default)
 5. Unclear matches: **Organizer → Bank Sync → Review queue** (approve / assign / discard); event view shows that event’s matches
