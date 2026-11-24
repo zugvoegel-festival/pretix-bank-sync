@@ -168,10 +168,9 @@ class BankConnectionDeleteView(OrganizerPermissionRequiredMixin, DeleteView):
             'organizer': self.request.organizer.slug
         })
 
-    def delete(self, request, *args, **kwargs):
-        connection = self.get_object()
-        messages.success(request, _('Bank connection deleted successfully.'))
-        return super().delete(request, *args, **kwargs)
+    def form_valid(self, form):
+        messages.success(self.request, _('Bank connection deleted successfully.'))
+        return super().form_valid(form)
 
 
 class BankConnectionRenewView(OrganizerPermissionRequiredMixin, View):
@@ -677,6 +676,7 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
         # GoCardless settings
         gocardless_client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
         gocardless_client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
+        auto_confirm = organizer.settings.get('pretix_bank_sync_auto_confirm', True)
         
         # Get active tab from request
         active_tab = self.request.GET.get('tab', 'gocardless')  # Default to GoCardless tab
@@ -687,6 +687,7 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
             'recent_transactions': recent_transactions,
             'gocardless_client_id': gocardless_client_id,
             'gocardless_client_secret': gocardless_client_secret,
+            'auto_confirm': auto_confirm,
             'active_tab': active_tab,
         })
         return ctx
@@ -700,9 +701,11 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
         if active_tab == 'gocardless':
             client_id = request.POST.get('gocardless_client_id', '').strip()
             client_secret = request.POST.get('gocardless_client_secret', '').strip()
+            auto_confirm = request.POST.get('auto_confirm') == 'on'
             
             organizer.settings.set('pretix_bank_sync_gocardless_client_id', client_id)
             organizer.settings.set('pretix_bank_sync_gocardless_client_secret', client_secret)
+            organizer.settings.set('pretix_bank_sync_auto_confirm', auto_confirm)
             
             messages.success(request, _('GoCardless settings saved successfully.'))
             return redirect(f"{reverse('plugins:pretix_bank_sync:settings', kwargs={'organizer': organizer.slug})}?tab=gocardless")
@@ -738,130 +741,79 @@ class BankSelectionForm(forms.Form):
             self.fields['bank_name'].choices = choices
 
 
-class BankSyncCallbackView(OrganizerPermissionRequiredMixin, View):
-    """Handle OAuth callback from GoCardless."""
-    permission = 'can_change_organizer_settings'
+class BankSyncCallbackView(View):
+    """
+    Handle OAuth callback from GoCardless.
+
+    Intentionally unauthenticated: the bank redirect returns here without a
+    pretix session. Connection is activated by requisition ``ref``; the user
+    may need to log in again to view the connections list.
+    """
 
     def get(self, request, *args, **kwargs):
-        organizer = request.organizer
+        organizer = get_object_or_404(Organizer, slug=kwargs['organizer'])
         # GoCardless returns 'ref' parameter with requisition_id
         ref = request.GET.get('ref')
-        
-        if ref:
-            try:
-                connection = BankConnection.objects.filter(
-                    organizer=organizer,
-                    requisition_id=ref
-                ).first()
-                
-                if not connection:
-                    messages.error(request, _('No pending connection found.'))
-                    return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
-                
-                # Verify requisition status
-                client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-                client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-                redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
-                
-                callback_url = build_absolute_uri(
-                    'plugins:pretix_bank_sync:callback',
-                    kwargs={'organizer': organizer.slug}
-                )
-                
-                service = GoCardlessService(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri=redirect_uri or callback_url
-                )
-                
-                requisition = service.get_requisition(ref)
-                status = requisition.get('status', '')
-                
-                if status == 'LN':  # Linked (authorized)
-                    connection.status = BankConnection.STATUS_ACTIVE
-                    connection.consent_expires_at = now() + timedelta(days=90)  # Default 90 days
-                    connection.save(update_fields=['status', 'consent_expires_at'])
-                    messages.success(request, _('Bank account connected successfully!'))
-                    # Clear session data
-                    request.session.pop('gocardless_auth_link', None)
-                    request.session.pop('gocardless_selected_institution', None)
-                    # Redirect to connections list instead of wizard
-                    return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
-                else:
-                    connection.status = BankConnection.STATUS_ERROR
-                    connection.last_error = f"Requisition status: {status}"
-                    connection.last_error_at = now()
-                    connection.save(update_fields=['status', 'last_error', 'last_error_at'])
-                    messages.error(request, _('Authorization failed. Status: {}').format(status))
-                    return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=authorize")
-                    
-            except Exception as e:
-                logger.exception("Error processing GoCardless callback")
-                messages.error(request, _('An error occurred: {}').format(str(e)))
-                return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
-        
-        # Handle Enable Banking callback (legacy)
-        if not code:
-            messages.error(request, _('Invalid callback. Missing authorization code.'))
-            return redirect('plugins:pretix_bank_sync:settings', organizer=organizer.slug)
+        list_url = reverse(
+            'plugins:pretix_bank_sync:connections_list',
+            kwargs={'organizer': organizer.slug},
+        )
+
+        if not ref:
+            messages.error(request, _('Invalid callback. Missing requisition reference.'))
+            return redirect(list_url)
 
         try:
-            # Get connection (verify state matches)
-            connection = BankConnection.objects.filter(organizer=organizer).first()
+            connection = BankConnection.objects.filter(
+                organizer=organizer,
+                requisition_id=ref,
+            ).first()
+
             if not connection:
                 messages.error(request, _('No pending connection found.'))
-                return redirect('plugins:pretix_bank_sync:settings', organizer=organizer.slug)
+                return redirect(list_url)
 
-            # Get settings
-            application_id = organizer.settings.get('pretix_bank_sync_application_id', '')
-            private_key_path = organizer.settings.get('pretix_bank_sync_private_key_path', '')
-            redirect_uri = organizer.settings.get('pretix_bank_sync_redirect_uri', '')
+            client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
+            client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
+            redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
 
-            if not application_id or not private_key_path:
-                messages.error(request, _('Enable Banking credentials not configured.'))
-                return redirect('plugins:pretix_bank_sync:settings', organizer=organizer.slug)
-
-            # Initialize service
-            service = EnableBankingService(
-                application_id=application_id,
-                private_key_path=private_key_path,
-                redirect_uri=redirect_uri
+            callback_url = build_absolute_uri(
+                'plugins:pretix_bank_sync:callback',
+                kwargs={'organizer': organizer.slug},
             )
 
-            # Create session using the authorization code
-            session = service.create_session(code)
-            
-            # Session contains accounts list
-            accounts = session.get('accounts', [])
-            if not accounts:
-                connection.status = BankConnection.STATUS_ERROR
-                connection.last_error = "No accounts found in session"
-                connection.last_error_at = now()
-                connection.save(update_fields=['status', 'last_error', 'last_error_at'])
-                messages.error(request, _('No accounts found in the session.'))
-                return redirect('plugins:pretix_bank_sync:settings', organizer=organizer.slug)
+            service = GoCardlessService(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri or callback_url,
+            )
 
-            # Store session information
-            # Note: Enable Banking sessions are temporary, we'll need to re-authorize periodically
-            # For now, we'll store the first account UID in requisition_id
-            first_account = accounts[0]
-            account_uid = first_account.get('uid', '')
-            
-            connection.status = BankConnection.STATUS_ACTIVE
-            connection.requisition_id = account_uid  # Store account UID
-            connection.consent_id = session.get('session_id', '')  # Store session ID if available
-            # Enable Banking access is valid for the period specified in authorization
-            # We'll set expiration to 10 days from now (default)
-            connection.consent_expires_at = now() + timedelta(days=10)
-            connection.save(update_fields=['status', 'requisition_id', 'consent_id', 'consent_expires_at'])
+            requisition = service.get_requisition(ref)
+            status = requisition.get('status', '')
 
-            messages.success(request, _('Bank account connected successfully!'))
+            if status == 'LN':  # Linked (authorized)
+                connection.status = BankConnection.STATUS_ACTIVE
+                connection.consent_expires_at = now() + timedelta(days=90)
+                connection.last_error = ''
+                connection.save(update_fields=['status', 'consent_expires_at', 'last_error'])
+                messages.success(request, _('Bank account connected successfully!'))
+                request.session.pop('gocardless_auth_link', None)
+                request.session.pop('gocardless_selected_institution', None)
+                return redirect(list_url)
+
+            connection.status = BankConnection.STATUS_ERROR
+            connection.last_error = f"Requisition status: {status}"
+            connection.last_error_at = now()
+            connection.save(update_fields=['status', 'last_error', 'last_error_at'])
+            messages.error(request, _('Authorization failed. Status: {}').format(status))
+            return redirect(
+                f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=authorize"
+            )
 
         except Exception as e:
-            logger.exception("Error processing Enable Banking callback")
+            logger.exception("Error processing GoCardless callback")
             messages.error(request, _('An error occurred: {}').format(str(e)))
-
-        return redirect('plugins:pretix_bank_sync:settings', organizer=organizer.slug)
+            return redirect(list_url)
 
 
 class BankSyncFetchTransactionsView(OrganizerPermissionRequiredMixin, View):
@@ -1154,7 +1106,7 @@ class TransactionMatchApproveView(EventPermissionRequiredMixin, View):
         suggestion = get_object_or_404(
             TransactionMatchSuggestion,
             pk=kwargs['suggestion_id'],
-            transaction__order__event=event,
+            order__event=event,
             is_approved__isnull=True
         )
         
@@ -1177,7 +1129,7 @@ class TransactionMatchRejectView(EventPermissionRequiredMixin, View):
         suggestion = get_object_or_404(
             TransactionMatchSuggestion,
             pk=kwargs['suggestion_id'],
-            transaction__order__event=event,
+            order__event=event,
             is_approved__isnull=True
         )
         

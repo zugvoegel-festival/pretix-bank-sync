@@ -1,7 +1,7 @@
 [project]
 name = "pretix-bank-sync"
 dynamic = ["version"]
-description = "Sync bank account transactions via Enable Banking and automatically match them to orders"
+description = "Sync bank account transactions via GoCardless Bank Account Data and automatically match them to orders"
 readme = "README.rst"
 license = {text = "Apache"}
 keywords = ["pretix"]
@@ -14,12 +14,10 @@ maintainers = [
 
 dependencies = [
     "requests>=2.25.0",
-    "PyJWT>=2.0.0",
-    "cryptography>=3.0.0",
 ]
 
 [project.entry-points."pretix.plugin"]
-pretix_bank_sync = "pretix_bank_sync:PretixPluginMeta"
+pretix_bank_sync = "pretix_bank_sync.apps:PluginApp"
 
 [project.entry-points."distutils.commands"]
 build = "pretix_plugin_build.build:CustomBuild"

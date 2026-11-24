@@ -1,0 +1,158 @@
+{% extends "pretixcontrol/base.html" %}
+{% load i18n %}
+{% load static %}
+{% load compress %}
+
+{% block title %}{% trans "Bank Sync" %}{% endblock %}
+
+{% block custom_header %}
+    {{ block.super }}
+    {% compress css %}
+        <link rel="stylesheet" type="text/x-scss" href="{% static "pretix_bank_sync/scss/bank_sync_common.scss" %}" />
+    {% endcompress %}
+{% endblock %}
+
+{% block content %}
+    <h1>{% trans "Bank Sync" %}</h1>
+
+    <div class="bank-sync-margin-bottom">
+        <a href="{% url 'plugins:pretix_bank_sync:bank_setup_wizard' organizer=organizer.slug %}" class="btn btn-primary">
+            <span class="fa fa-plus"></span>
+            {% trans "Set up connection" %}
+        </a>
+        <a href="{% url 'plugins:pretix_bank_sync:settings' organizer=organizer.slug %}" class="btn btn-default">
+            <span class="fa fa-cog"></span>
+            {% trans "Settings" %}
+        </a>
+        <a href="{% url 'plugins:pretix_bank_sync:transactions' organizer=organizer.slug %}" class="btn btn-default">
+            <span class="fa fa-list"></span>
+            {% trans "Transactions" %}
+        </a>
+        {% if stats.active %}
+            <form method="post" action="{% url 'plugins:pretix_bank_sync:fetch_transactions' organizer=organizer.slug %}" style="display:inline;">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-default">
+                    <span class="fa fa-refresh"></span>
+                    {% trans "Fetch transactions now" %}
+                </button>
+            </form>
+        {% endif %}
+    </div>
+
+    {% if not has_credentials %}
+        <div class="alert alert-warning">
+            {% blocktrans trimmed %}
+                GoCardless credentials are not configured yet.
+                Use the setup wizard or settings page to add your Secret ID and Secret Key.
+            {% endblocktrans %}
+        </div>
+    {% endif %}
+
+    <div class="row bank-sync-stats">
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number">{{ stats.total }}</span>
+                <span class="stat-label">{% trans "Total" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number text-success">{{ stats.active }}</span>
+                <span class="stat-label">{% trans "Active" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number text-muted">{{ stats.pending }}</span>
+                <span class="stat-label">{% trans "Pending" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number text-warning">{{ stats.expired }}</span>
+                <span class="stat-label">{% trans "Expired" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number text-danger">{{ stats.error }}</span>
+                <span class="stat-label">{% trans "Error" %}</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel panel-default">
+        <div class="panel-heading">
+            <h3 class="panel-title">{% trans "Connections" %}</h3>
+        </div>
+        <div class="panel-body">
+            {% if connections %}
+                <div class="table-responsive">
+                    <table class="table table-condensed table-hover">
+                        <thead>
+                            <tr>
+                                <th>{% trans "Status" %}</th>
+                                <th>{% trans "Requisition" %}</th>
+                                <th>{% trans "Last sync" %}</th>
+                                <th>{% trans "Syncs today" %}</th>
+                                <th>{% trans "Consent expires" %}</th>
+                                <th>{% trans "Transactions" %}</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for connection in connections %}
+                                <tr>
+                                    <td>
+                                        <span class="label label-{% if connection.status == 'active' %}success{% elif connection.status == 'pending' %}info{% elif connection.status == 'expired' %}warning{% else %}danger{% endif %}">
+                                            {{ connection.get_status_display }}
+                                        </span>
+                                    </td>
+                                    <td><code>{{ connection.requisition_id|truncatechars:24 }}</code></td>
+                                    <td>
+                                        {% if connection.last_sync %}
+                                            {{ connection.last_sync|date:"SHORT_DATETIME_FORMAT" }}
+                                        {% else %}
+                                            —
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ connection.sync_count_today }} / 4</td>
+                                    <td>
+                                        {% if connection.consent_expires_at %}
+                                            {{ connection.consent_expires_at|date:"SHORT_DATE_FORMAT" }}
+                                        {% else %}
+                                            —
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ connection.transaction_count }}</td>
+                                    <td class="text-right">
+                                        {% if connection.status == 'expired' or connection.status == 'error' %}
+                                            <form method="post" action="{% url 'plugins:pretix_bank_sync:connection_renew' organizer=organizer.slug connection_id=connection.pk %}" style="display:inline;">
+                                                {% csrf_token %}
+                                                <button type="submit" class="btn btn-sm btn-default">{% trans "Renew" %}</button>
+                                            </form>
+                                        {% endif %}
+                                        <a href="{% url 'plugins:pretix_bank_sync:connection_delete' organizer=organizer.slug pk=connection.pk %}" class="btn btn-sm btn-danger">
+                                            {% trans "Delete" %}
+                                        </a>
+                                    </td>
+                                </tr>
+                                {% if connection.last_error %}
+                                    <tr class="warning">
+                                        <td colspan="7">
+                                            <small class="text-danger">{% trans "Error" %}: {{ connection.last_error }}</small>
+                                        </td>
+                                    </tr>
+                                {% endif %}
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <p class="text-muted">
+                    {% trans "No bank connections yet. Start the setup wizard to connect a bank account." %}
+                </p>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

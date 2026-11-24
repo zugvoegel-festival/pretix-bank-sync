@@ -1,0 +1,269 @@
+{% extends "pretixcontrol/base.html" %}
+{% load i18n %}
+{% load static %}
+{% load compress %}
+
+{% block title %}{% trans "Bank connection setup" %}{% endblock %}
+
+{% block custom_header %}
+    {{ block.super }}
+    {% compress css %}
+        <link rel="stylesheet" type="text/x-scss" href="{% static "pretix_bank_sync/scss/bank_sync_common.scss" %}" />
+    {% endcompress %}
+{% endblock %}
+
+{% block content %}
+    <h1>{% trans "Bank connection setup" %}</h1>
+
+    <div class="bank-sync-margin-bottom">
+        <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-default">
+            <span class="fa fa-arrow-left"></span>
+            {% trans "Back to connections" %}
+        </a>
+    </div>
+
+    <ul class="bank-sync-wizard-steps">
+        {% for s in steps %}
+            <li class="{{ s.status }}">{{ s.label }}</li>
+        {% endfor %}
+    </ul>
+
+    <div class="panel panel-default">
+        <div class="panel-heading">
+            <h3 class="panel-title">{{ current_step.label }}</h3>
+        </div>
+        <div class="panel-body">
+            <p class="help-block">{{ current_step.description }}</p>
+
+            {% if step == 'credentials' %}
+                {% if credentials_valid %}
+                    <div class="alert alert-success">{{ credentials_test_message }}</div>
+                {% elif credentials_error %}
+                    <div class="alert alert-danger">{{ credentials_error }}</div>
+                {% endif %}
+
+                <form method="post" action="" class="form-horizontal">
+                    {% csrf_token %}
+                    <input type="hidden" name="step" value="credentials">
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Secret ID" %}</label>
+                        <div class="col-md-9">
+                            <input type="text" name="client_id" class="form-control" value="{{ client_id }}" required>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Secret Key" %}</label>
+                        <div class="col-md-9">
+                            <input type="password" name="client_secret" class="form-control" value="{{ client_secret }}" required>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Redirect URI (optional)" %}</label>
+                        <div class="col-md-9">
+                            <input type="url" name="redirect_uri" class="form-control" value="{{ redirect_uri }}"
+                                   placeholder="{{ callback_url }}">
+                            <p class="help-block">
+                                {% blocktrans trimmed with url=callback_url %}
+                                    Leave empty to use the plugin callback:
+                                    <code>{{ url }}</code>
+                                {% endblocktrans %}
+                            </p>
+                        </div>
+                    </div>
+                    <div class="form-group submit-group">
+                        <button type="submit" name="action" value="test" class="btn btn-default">{% trans "Test credentials" %}</button>
+                        <button type="submit" class="btn btn-primary">{% trans "Save and continue" %}</button>
+                    </div>
+                </form>
+
+            {% elif step == 'select_country' %}
+                <form method="post" action="" class="form-horizontal">
+                    {% csrf_token %}
+                    <input type="hidden" name="step" value="select_country">
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Country" %}</label>
+                        <div class="col-md-9">
+                            <select name="country" class="form-control" required>
+                                <option value="">{% trans "— Select —" %}</option>
+                                {% for code, name in countries %}
+                                    <option value="{{ code }}" {% if selected_country == code %}selected{% endif %}>{{ name }}</option>
+                                {% empty %}
+                                    <option value="DE" {% if selected_country == 'DE' %}selected{% endif %}>Germany (DE)</option>
+                                    <option value="AT" {% if selected_country == 'AT' %}selected{% endif %}>Austria (AT)</option>
+                                    <option value="CH" {% if selected_country == 'CH' %}selected{% endif %}>Switzerland (CH)</option>
+                                    <option value="NL" {% if selected_country == 'NL' %}selected{% endif %}>Netherlands (NL)</option>
+                                    <option value="BE" {% if selected_country == 'BE' %}selected{% endif %}>Belgium (BE)</option>
+                                    <option value="FR" {% if selected_country == 'FR' %}selected{% endif %}>France (FR)</option>
+                                    <option value="GB" {% if selected_country == 'GB' %}selected{% endif %}>United Kingdom (GB)</option>
+                                    <option value="IE" {% if selected_country == 'IE' %}selected{% endif %}>Ireland (IE)</option>
+                                    <option value="ES" {% if selected_country == 'ES' %}selected{% endif %}>Spain (ES)</option>
+                                    <option value="IT" {% if selected_country == 'IT' %}selected{% endif %}>Italy (IT)</option>
+                                    <option value="PT" {% if selected_country == 'PT' %}selected{% endif %}>Portugal (PT)</option>
+                                    <option value="PL" {% if selected_country == 'PL' %}selected{% endif %}>Poland (PL)</option>
+                                    <option value="SE" {% if selected_country == 'SE' %}selected{% endif %}>Sweden (SE)</option>
+                                    <option value="FI" {% if selected_country == 'FI' %}selected{% endif %}>Finland (FI)</option>
+                                    <option value="NO" {% if selected_country == 'NO' %}selected{% endif %}>Norway (NO)</option>
+                                    <option value="DK" {% if selected_country == 'DK' %}selected{% endif %}>Denmark (DK)</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group submit-group">
+                        <button type="submit" class="btn btn-primary">{% trans "Continue" %}</button>
+                    </div>
+                </form>
+
+            {% elif step == 'select_bank' %}
+                {% if not selected_country %}
+                    <div class="alert alert-warning">{% trans "Please select a country first." %}</div>
+                {% else %}
+                    <p>{% blocktrans %}Country: <strong>{{ selected_country }}</strong>{% endblocktrans %}</p>
+                    <form method="post" action="" id="bank-select-form">
+                        {% csrf_token %}
+                        <input type="hidden" name="step" value="select_bank">
+                        <div class="form-group">
+                            <label for="institution_id">{% trans "Bank" %}</label>
+                            <select name="institution_id" id="institution_id" class="form-control" required>
+                                <option value="">{% trans "— Loading banks… —" %}</option>
+                            </select>
+                        </div>
+                        <div class="form-group submit-group">
+                            <button type="submit" class="btn btn-primary">{% trans "Continue" %}</button>
+                        </div>
+                    </form>
+                    <script type="application/json" id="preloaded-institutions">{{ preloaded_institutions_json|default:"[]"|safe }}</script>
+                    <script>
+                    (function () {
+                        var select = document.getElementById('institution_id');
+                        var preloaded = [];
+                        try {
+                            preloaded = JSON.parse(document.getElementById('preloaded-institutions').textContent || '[]');
+                        } catch (e) {}
+                        function fill(list) {
+                            select.innerHTML = '';
+                            var empty = document.createElement('option');
+                            empty.value = '';
+                            empty.textContent = '{% trans "— Select a bank —" %}';
+                            select.appendChild(empty);
+                            (list || []).forEach(function (inst) {
+                                var opt = document.createElement('option');
+                                opt.value = inst.id || inst.bic || '';
+                                opt.textContent = inst.name + (inst.bic ? ' (' + inst.bic + ')' : '');
+                                select.appendChild(opt);
+                            });
+                        }
+                        if (preloaded && preloaded.length) {
+                            fill(preloaded);
+                        } else {
+                            var url = '{% url "plugins:pretix_bank_sync:institutions_ajax" organizer=organizer.slug %}?country={{ selected_country|urlencode }}';
+                            fetch(url, {credentials: 'same-origin'})
+                                .then(function (r) { return r.json(); })
+                                .then(function (data) { fill(data.results || []); })
+                                .catch(function () {
+                                    select.innerHTML = '<option value="">{% trans "Failed to load banks" %}</option>';
+                                });
+                        }
+                    })();
+                    </script>
+                {% endif %}
+
+            {% elif step == 'create_requisition' %}
+                <p>
+                    {% if selected_institution %}
+                        {% blocktrans trimmed with inst=selected_institution %}
+                            Selected institution: <code>{{ inst }}</code>
+                        {% endblocktrans %}
+                    {% else %}
+                        {% trans "No institution selected." %}
+                    {% endif %}
+                </p>
+                <form method="post" action="">
+                    {% csrf_token %}
+                    <input type="hidden" name="step" value="create_requisition">
+                    <button type="submit" class="btn btn-primary" {% if not selected_institution %}disabled{% endif %}>
+                        {% trans "Create requisition" %}
+                    </button>
+                </form>
+
+            {% elif step == 'authorize' %}
+                {% if has_auth_link %}
+                    <div class="alert alert-info">
+                        {% blocktrans trimmed %}
+                            Click the button below to open your bank’s authorization page.
+                            After approving access you will be redirected back here.
+                        {% endblocktrans %}
+                    </div>
+                    <form method="post" action="">
+                        {% csrf_token %}
+                        <input type="hidden" name="step" value="authorize">
+                        <button type="submit" class="btn btn-primary btn-lg">
+                            <span class="fa fa-external-link"></span>
+                            {% trans "Authorize with bank" %}
+                        </button>
+                    </form>
+                {% else %}
+                    <div class="alert alert-warning">
+                        {% trans "No authorization link found. Go back and create a requisition first." %}
+                    </div>
+                    <a href="?step=create_requisition" class="btn btn-default">{% trans "Back" %}</a>
+                {% endif %}
+
+            {% elif step == 'verify' %}
+                {% if error %}
+                    <div class="alert alert-danger">{{ error }}</div>
+                {% elif requisition %}
+                    <p>
+                        {% trans "Requisition status" %}:
+                        <strong>{{ requisition_status }}</strong>
+                    </p>
+                    {% if accounts %}
+                        <ul>
+                            {% for account in accounts %}
+                                <li>
+                                    {{ account.iban|default:account.id }}
+                                    {% if account.name %} — {{ account.name }}{% endif %}
+                                </li>
+                            {% endfor %}
+                        </ul>
+                    {% endif %}
+                    <a href="?step=test{% if connection %}&connection_id={{ connection.pk }}{% endif %}" class="btn btn-primary">
+                        {% trans "Continue to balance test" %}
+                    </a>
+                {% else %}
+                    <div class="alert alert-warning">
+                        {% trans "No connection to verify. Complete authorization first." %}
+                    </div>
+                {% endif %}
+
+            {% elif step == 'test' %}
+                {% if test_success %}
+                    <div class="alert alert-success">{% trans "Successfully fetched account balances." %}</div>
+                    <p><strong>{% trans "Account" %}:</strong> {{ test_account_id }}</p>
+                    {% if test_balances %}
+                        <pre>{{ test_balances }}</pre>
+                    {% endif %}
+                    <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-primary">
+                        {% trans "Done" %}
+                    </a>
+                {% elif error %}
+                    <div class="alert alert-danger">{{ error }}</div>
+                    <form method="post" action="">
+                        {% csrf_token %}
+                        <input type="hidden" name="step" value="test">
+                        <button type="submit" class="btn btn-default">{% trans "Retry" %}</button>
+                    </form>
+                {% else %}
+                    <div class="alert alert-warning">
+                        {% trans "Connect and authorize a bank account before testing balances." %}
+                    </div>
+                    <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-default">
+                        {% trans "Back to connections" %}
+                    </a>
+                {% endif %}
+
+            {% else %}
+                <div class="alert alert-warning">{% trans "Unknown setup step." %}</div>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

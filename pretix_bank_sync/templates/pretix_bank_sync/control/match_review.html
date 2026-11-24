@@ -1,0 +1,150 @@
+{% extends "pretixcontrol/base.html" %}
+{% load i18n %}
+{% load static %}
+{% load compress %}
+
+{% block title %}{% trans "Bank Transactions" %} · {{ event.name }}{% endblock %}
+
+{% block custom_header %}
+    {{ block.super }}
+    {% compress css %}
+        <link rel="stylesheet" type="text/x-scss" href="{% static "pretix_bank_sync/scss/bank_sync_common.scss" %}" />
+    {% endcompress %}
+{% endblock %}
+
+{% block content %}
+    <h1>{% trans "Bank Transactions" %}</h1>
+    <p class="text-muted">{{ event.name }}</p>
+
+    <div class="row bank-sync-stats">
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number">{{ total_transactions }}</span>
+                <span class="stat-label">{% trans "Shown" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number text-warning">{{ pending_suggestions }}</span>
+                <span class="stat-label">{% trans "Pending suggestions" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number text-info">{{ pending_approval }}</span>
+                <span class="stat-label">{% trans "Pending approval" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number text-success">{{ matched_transactions }}</span>
+                <span class="stat-label">{% trans "Matched" %}</span>
+            </div>
+        </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number">{{ unmatched_transactions }}</span>
+                <span class="stat-label">{% trans "Unmatched" %}</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel panel-default">
+        <div class="panel-heading">
+            <h3 class="panel-title">{% trans "Transactions &amp; match suggestions" %}</h3>
+        </div>
+        <div class="panel-body">
+            {% if transactions %}
+                {% for trans in transactions %}
+                    <div class="panel panel-default">
+                        <div class="panel-heading">
+                            <strong>{{ trans.amount }} {{ trans.currency }}</strong>
+                            · {{ trans.date|date:"SHORT_DATE_FORMAT" }}
+                            ·
+                            <span class="label label-{% if trans.state == 'matched' %}success{% elif trans.state == 'pending_approval' %}warning{% elif trans.state == 'nomatch' %}default{% elif trans.state == 'error' %}danger{% else %}info{% endif %}">
+                                {{ trans.get_state_display }}
+                            </span>
+                            {% if trans.order %}
+                                ·
+                                <a href="{% url 'control:event.order' organizer=trans.order.event.organizer.slug event=trans.order.event.slug code=trans.order.code %}">
+                                    {{ trans.order.code }}
+                                </a>
+                            {% endif %}
+                        </div>
+                        <div class="panel-body">
+                            <p>
+                                <strong>{% trans "Reference" %}:</strong>
+                                {{ trans.get_reference_text|default:"—" }}
+                            </p>
+                            {% if trans.debtor_name %}
+                                <p>
+                                    <strong>{% trans "Sender" %}:</strong>
+                                    {{ trans.debtor_name }}
+                                </p>
+                            {% endif %}
+
+                            {% with suggestions=trans.match_suggestions.all %}
+                                {% if suggestions %}
+                                    <table class="table table-condensed">
+                                        <thead>
+                                            <tr>
+                                                <th>{% trans "Order" %}</th>
+                                                <th>{% trans "Type" %}</th>
+                                                <th>{% trans "Confidence" %}</th>
+                                                <th>{% trans "Reason" %}</th>
+                                                <th>{% trans "Status" %}</th>
+                                                <th></th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {% for suggestion in suggestions %}
+                                                {% if suggestion.order.event_id == event.id %}
+                                                    <tr>
+                                                        <td>
+                                                            <a href="{% url 'control:event.order' organizer=suggestion.order.event.organizer.slug event=suggestion.order.event.slug code=suggestion.order.code %}">
+                                                                {{ suggestion.order.code }}
+                                                            </a>
+                                                        </td>
+                                                        <td>{{ suggestion.get_match_type_display }}</td>
+                                                        <td>{{ suggestion.confidence_score|floatformat:2 }}</td>
+                                                        <td>{{ suggestion.match_reason }}</td>
+                                                        <td>
+                                                            {% if suggestion.is_approved == True %}
+                                                                <span class="label label-success">{% trans "Approved" %}</span>
+                                                            {% elif suggestion.is_approved == False %}
+                                                                <span class="label label-danger">{% trans "Rejected" %}</span>
+                                                            {% else %}
+                                                                <span class="label label-warning">{% trans "Pending" %}</span>
+                                                            {% endif %}
+                                                        </td>
+                                                        <td class="text-right">
+                                                            {% if suggestion.is_approved is None %}
+                                                                <form method="post" action="{% url 'plugins:pretix_bank_sync:match_approve' organizer=organizer.slug event=event.slug suggestion_id=suggestion.pk %}" style="display:inline;">
+                                                                    {% csrf_token %}
+                                                                    <button type="submit" class="btn btn-xs btn-success">{% trans "Approve" %}</button>
+                                                                </form>
+                                                                <form method="post" action="{% url 'plugins:pretix_bank_sync:match_reject' organizer=organizer.slug event=event.slug suggestion_id=suggestion.pk %}" style="display:inline;">
+                                                                    {% csrf_token %}
+                                                                    <button type="submit" class="btn btn-xs btn-default">{% trans "Reject" %}</button>
+                                                                </form>
+                                                            {% endif %}
+                                                        </td>
+                                                    </tr>
+                                                {% endif %}
+                                            {% endfor %}
+                                        </tbody>
+                                    </table>
+                                {% elif not trans.order %}
+                                    <p class="text-muted">{% trans "No match suggestions for this event." %}</p>
+                                {% endif %}
+                            {% endwith %}
+                        </div>
+                    </div>
+                {% endfor %}
+                {% include "pretixcontrol/pagination.html" %}
+            {% else %}
+                <p class="text-muted">{% trans "No bank transactions to review for this event." %}</p>
+            {% endif %}
+        </div>
+    </div>
+{% endblock %}

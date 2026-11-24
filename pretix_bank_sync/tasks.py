@@ -691,6 +691,7 @@ def match_transactions(connection: BankConnection):
         return
 
     organizer = connection.organizer
+    auto_confirm = organizer.settings.get('pretix_bank_sync_auto_confirm', True)
 
     for trans in transactions:
         if trans.amount == Decimal("0.00"):
@@ -716,7 +717,7 @@ def match_transactions(connection: BankConnection):
         is_multi_order = "Multiple order codes found" in best_suggestion.get('match_reason', '')
         
         # Check for multi-order payment auto-approval
-        if is_multi_order:
+        if is_multi_order and auto_confirm:
             # Find all suggestions that mention multiple orders
             multi_order_suggestions = [s for s in suggestions if "Multiple order codes found" in s.get('match_reason', '')]
             
@@ -764,7 +765,8 @@ def match_transactions(connection: BankConnection):
                         amount_match=sug['amount_match'],
                         amount_difference=sug.get('amount_difference', Decimal('0')),
                     )
-        elif (best_suggestion['match_type'] == TransactionMatchSuggestion.MATCH_TYPE_EXACT_CODE and
+        elif (auto_confirm and
+              best_suggestion['match_type'] == TransactionMatchSuggestion.MATCH_TYPE_EXACT_CODE and
               best_suggestion['confidence_score'] >= 0.95 and
               best_suggestion['amount_match'] and
               is_eur and
