@@ -747,6 +747,8 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
         # Get active tab from request
         active_tab = self.request.GET.get('tab', 'gocardless')  # Default to GoCardless tab
         
+        from . import __version__ as plugin_version
+
         ctx.update({
             'organizer': organizer,
             'connection': connection,
@@ -755,41 +757,41 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
             'secret_configured': secret_configured,
             'auto_confirm': auto_confirm,
             'active_tab': active_tab,
+            'bank_sync_version': plugin_version,
         })
         return ctx
 
     def post(self, request, *args, **kwargs):
         """Handle settings form submission."""
         organizer = request.organizer
-        active_tab = request.POST.get('tab', '')
-        
-        # Handle GoCardless settings
-        if active_tab == 'gocardless':
+        settings_url = (
+            f"{reverse('plugins:pretix_bank_sync:settings', kwargs={'organizer': organizer.slug})}"
+            f"?tab=gocardless"
+        )
+        try:
+            active_tab = request.POST.get('tab', '')
+            if active_tab != 'gocardless':
+                return redirect(settings_url)
+
             client_id = request.POST.get('gocardless_client_id', '').strip()
             client_secret = request.POST.get('gocardless_client_secret', '').strip()
             auto_confirm = request.POST.get('auto_confirm') == 'on'
-            
-            try:
-                # Empty secret field = keep existing encrypted secret
-                set_gocardless_credentials(
-                    organizer,
-                    client_id=client_id,
-                    client_secret=client_secret if client_secret else None,
-                )
-                organizer.settings.set('pretix_bank_sync_auto_confirm', auto_confirm)
-            except Exception:
-                logger.exception("Failed to save GoCardless credentials")
-                messages.error(
-                    request,
-                    _('Could not save GoCardless credentials. Please try again or contact support.'),
-                )
-                return redirect(f"{reverse('plugins:pretix_bank_sync:settings', kwargs={'organizer': organizer.slug})}?tab=gocardless")
 
+            # Empty secret field = keep existing encrypted secret
+            set_gocardless_credentials(
+                organizer,
+                client_id=client_id,
+                client_secret=client_secret if client_secret else None,
+            )
+            organizer.settings.set('pretix_bank_sync_auto_confirm', bool(auto_confirm))
             messages.success(request, _('GoCardless settings saved successfully.'))
-            return redirect(f"{reverse('plugins:pretix_bank_sync:settings', kwargs={'organizer': organizer.slug})}?tab=gocardless")
-        
-        # If no tab specified, redirect to GoCardless tab
-        return redirect(f"{reverse('plugins:pretix_bank_sync:settings', kwargs={'organizer': organizer.slug})}?tab=gocardless")
+        except Exception:
+            logger.exception("Failed to save GoCardless credentials")
+            messages.error(
+                request,
+                _('Could not save GoCardless credentials. Please try again or contact support.'),
+            )
+        return redirect(settings_url)
 
     def get_success_url(self):
         return reverse('plugins:pretix_bank_sync:settings', kwargs={

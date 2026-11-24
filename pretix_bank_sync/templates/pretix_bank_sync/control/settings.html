@@ -1,18 +1,18 @@
 {% extends "pretixcontrol/base.html" %}
 {% load i18n %}
 {% load bootstrap3 %}
-{% load static %}
 
 {% block title %}{% trans "Bank Sync Settings" %}{% endblock %}
 
 {% block custom_header %}
     {{ block.super }}
-    <link rel="stylesheet" type="text/css" href="{% static "pretix_bank_sync/css/bank_sync_common.css" %}" />
+    {% include "pretix_bank_sync/control/styles.html" %}
 {% endblock %}
 
 {% block content %}
     <h1>{% trans "Bank Sync Settings" %}</h1>
-    
+    {% if bank_sync_version %}<p class="text-muted" style="font-size:11px;">Bank Sync {{ bank_sync_version }}</p>{% endif %}
+
     <div class="bank-sync-margin-bottom">
         <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-default">
             <span class="fa fa-arrow-left"></span>
