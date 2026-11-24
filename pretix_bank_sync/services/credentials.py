@@ -76,7 +76,7 @@ def get_gocardless_credentials(organizer) -> Tuple[str, str, str]:
 
 
 def has_gocardless_credentials(organizer) -> bool:
-    client_id, client_secret, _ = get_gocardless_credentials(organizer)
+    client_id, client_secret, _redirect = get_gocardless_credentials(organizer)
     return bool(client_id and client_secret)
 
 
