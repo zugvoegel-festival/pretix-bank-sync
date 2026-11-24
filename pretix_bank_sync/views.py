@@ -487,7 +487,9 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             client_id = request.POST.get('client_id', '').strip()
             client_secret = request.POST.get('client_secret', '').strip()
             redirect_uri = request.POST.get('redirect_uri', '').strip()
-            _, existing_secret, _ = get_gocardless_credentials(organizer)
+            # Do not unpack into `_` — that shadows gettext_lazy as _ and
+            # makes later _('…') raise TypeError: 'str' object is not callable.
+            _cid, existing_secret, _redir = get_gocardless_credentials(organizer)
             secret_for_use = client_secret or existing_secret
             
             # Handle test action
@@ -740,7 +742,7 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
             recent_transactions = []
         
         # GoCardless settings
-        gocardless_client_id, _, _ = get_gocardless_credentials(organizer)
+        gocardless_client_id, _secret, _redir = get_gocardless_credentials(organizer)
         auto_confirm = organizer.settings.get('pretix_bank_sync_auto_confirm', True)
         secret_configured = secret_is_configured(organizer)
         
