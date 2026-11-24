@@ -7,11 +7,13 @@ import hashlib
 import re
 from decimal import Decimal
 
-from django.db import models
+from django.db import models, transaction
 from django.utils.timezone import now
 from django.utils.translation import gettext_lazy as _
 
 from pretix.base.models.base import LoggedModel
+
+from .services.rate_limit import MAX_SYNCS_PER_DAY, MIN_SYNC_INTERVAL, syncs_remaining
 
 
 class BankConnection(LoggedModel):
@@ -46,6 +48,11 @@ class BankConnection(LoggedModel):
         db_index=True,
         help_text=_("GoCardless requisition ID")
     )
+    account_ids = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_("Cached GoCardless account IDs for this requisition (avoids details API calls)")
+    )
 
     # Connection status
     status = models.CharField(
@@ -61,6 +68,11 @@ class BankConnection(LoggedModel):
         blank=True,
         help_text=_("Last successful sync timestamp")
     )
+    last_sync_attempt = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_("Last sync attempt (used to space periodic syncs and prevent overlap)")
+    )
     sync_count_today = models.IntegerField(
         default=0,
         help_text=_("Number of syncs performed today")
@@ -69,6 +81,11 @@ class BankConnection(LoggedModel):
         null=True,
         blank=True,
         help_text=_("Date of last sync (for resetting daily counter)")
+    )
+    rate_limited_until = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text=_("Do not sync until this time after a GoCardless HTTP 429")
     )
 
     # Consent management
@@ -105,17 +122,119 @@ class BankConnection(LoggedModel):
     def __str__(self):
         return f"Bank Connection for {self.organizer.name} ({self.status})"
 
-    def can_sync(self):
-        """Check if connection can perform a sync (not expired, under daily limit)."""
+    def _apply_daily_reset(self, today=None):
+        """Reset in-memory daily counter when the calendar day changed."""
+        today = today or now().date()
+        if self.last_sync_date != today:
+            self.sync_count_today = 0
+            self.last_sync_date = today
+
+    def is_rate_limited(self):
+        """True while a GoCardless 429 cooldown is active."""
+        return bool(self.rate_limited_until and self.rate_limited_until > now())
+
+    def syncs_remaining_today(self):
+        self._apply_daily_reset()
+        return syncs_remaining(self.sync_count_today)
+
+    def can_sync(self, force=False):
+        """
+        Check if connection can perform a sync.
+
+        Args:
+            force: When True (manual fetch), skip the minimum interval between
+                syncs. Daily cap and rate-limit cooldown still apply.
+        """
         if self.status != self.STATUS_ACTIVE:
             return False
+        if self.is_rate_limited():
+            return False
 
-        today = now().date()
-        if self.last_sync_date != today:
-            # Reset counter for new day
+        self._apply_daily_reset()
+        if self.sync_count_today >= MAX_SYNCS_PER_DAY:
+            return False
+
+        if not force:
+            reference = self.last_sync_attempt or self.last_sync
+            if reference and (now() - reference) < MIN_SYNC_INTERVAL:
+                return False
+
+        return True
+
+    def sync_block_reason(self, force=False):
+        """Human-readable reason when can_sync is False, else empty string."""
+        if self.status != self.STATUS_ACTIVE:
+            return _("Connection is not active.")
+        if self.is_rate_limited():
+            return _("Bank API rate limit active until {when}.").format(
+                when=self.rate_limited_until
+            )
+        self._apply_daily_reset()
+        if self.sync_count_today >= MAX_SYNCS_PER_DAY:
+            return _("Daily sync limit of {limit} reached.").format(
+                limit=MAX_SYNCS_PER_DAY
+            )
+        if not force:
+            reference = self.last_sync_attempt or self.last_sync
+            if reference and (now() - reference) < MIN_SYNC_INTERVAL:
+                return _("Next automatic sync is spaced to conserve the daily bank API budget.")
+        return ""
+
+    def try_begin_sync(self, force=False):
+        """
+        Atomically claim a sync attempt if allowed.
+
+        Sets ``last_sync_attempt`` under row lock so periodic tasks cannot
+        queue overlapping syncs. Does not increment ``sync_count_today``;
+        call ``record_sync_success`` after a successful transaction fetch.
+        """
+        with transaction.atomic():
+            conn = (
+                BankConnection.objects.select_for_update()
+                .get(pk=self.pk)
+            )
+            if not conn.can_sync(force=force):
+                return False
+            conn.last_sync_attempt = now()
+            # Persist daily reset side effects from can_sync/_apply_daily_reset
+            conn.save(update_fields=[
+                'last_sync_attempt', 'sync_count_today', 'last_sync_date'
+            ])
+            self.last_sync_attempt = conn.last_sync_attempt
+            self.sync_count_today = conn.sync_count_today
+            self.last_sync_date = conn.last_sync_date
             return True
 
-        return self.sync_count_today < 4
+    def record_sync_success(self):
+        """Mark a completed sync and consume one daily slot."""
+        with transaction.atomic():
+            conn = (
+                BankConnection.objects.select_for_update()
+                .get(pk=self.pk)
+            )
+            conn._apply_daily_reset()
+            conn.sync_count_today += 1
+            conn.last_sync = now()
+            if conn.rate_limited_until and conn.rate_limited_until <= now():
+                conn.rate_limited_until = None
+            conn.save(update_fields=[
+                'sync_count_today', 'last_sync_date', 'last_sync', 'rate_limited_until'
+            ])
+            self.sync_count_today = conn.sync_count_today
+            self.last_sync_date = conn.last_sync_date
+            self.last_sync = conn.last_sync
+            self.rate_limited_until = conn.rate_limited_until
+
+    def mark_rate_limited(self, until, message=""):
+        """Record a GoCardless 429 cooldown without flipping status to error."""
+        self.rate_limited_until = until
+        self.last_error = message or str(
+            _("Bank API rate limit exceeded. Sync paused until {when}.").format(when=until)
+        )
+        self.last_error_at = now()
+        self.save(update_fields=[
+            'rate_limited_until', 'last_error', 'last_error_at'
+        ])
 
     def days_until_consent_expiry(self):
         """Days until consent expires, or None if unknown."""

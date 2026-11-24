@@ -31,6 +31,7 @@ from .models import BankConnection, BankTransaction, TransactionMatchSuggestion
 from .services.gocardless_service import GoCardlessService
 from .services.notifications import send_connection_notification
 from .services.credentials import get_gocardless_credentials
+from .services.rate_limit import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
 
@@ -884,8 +885,14 @@ def match_transactions(connection: BankConnection):
 
 
 @app.task(base=TransactionAwareTask, bind=True, max_retries=3, default_retry_delay=60)
-def sync_bank_transactions(self, connection_id: int):
-    """Sync transactions from GoCardless for a bank connection."""
+def sync_bank_transactions(self, connection_id: int, force: bool = False):
+    """
+    Sync transactions from GoCardless for a bank connection.
+
+    Uses a lean API path (requisition account IDs + transactions only) and
+    respects the plugin rate-limit budget. Pass force=True for manual fetches
+    (bypasses spacing interval, not the daily cap / 429 cooldown).
+    """
     with scope(organizer=None):
         try:
             connection = BankConnection.objects.get(pk=connection_id)
@@ -894,12 +901,12 @@ def sync_bank_transactions(self, connection_id: int):
             return
 
     with scope(organizer=connection.organizer):
-        # Reset daily counter if needed
-        connection.reset_daily_counter()
-
-        # Check if we can sync
-        if not connection.can_sync():
-            logger.warning(f"Cannot sync connection {connection_id}: limit reached or not active")
+        # Atomically claim a sync attempt (spacing + overlap + daily/429 checks)
+        if not connection.try_begin_sync(force=force):
+            reason = connection.sync_block_reason(force=force)
+            logger.warning(
+                f"Cannot sync connection {connection_id}: {reason or 'limit reached or not active'}"
+            )
             return
 
         # Get settings
@@ -940,9 +947,15 @@ def sync_bank_transactions(self, connection_id: int):
                 logger.error(f"No requisition ID found for connection {connection_id}")
                 return
 
-            # Get accounts for this requisition
-            accounts = service.get_accounts(requisition_id)
-            if not accounts:
+            # Lean path: account IDs only — do not call details/balances during sync
+            account_ids = list(connection.account_ids or [])
+            if not account_ids:
+                account_ids = service.list_account_ids(requisition_id)
+                if account_ids:
+                    connection.account_ids = account_ids
+                    connection.save(update_fields=['account_ids'])
+
+            if not account_ids:
                 logger.warning(f"No accounts found for connection {connection_id}")
                 return
 
@@ -965,13 +978,14 @@ def sync_bank_transactions(self, connection_id: int):
 
             # Get transactions for each account
             new_transactions = []
-            for account in accounts:
-                account_id = account.get('id', '')
+            fetched_any = False
+            for account_id in account_ids:
                 if not account_id:
                     continue
 
                 try:
                     transactions = service.get_transactions(account_id)
+                    fetched_any = True
                     for tx_data in transactions:
                         # Normalize transaction
                         normalized = service.normalize_transaction(tx_data, account_id)
@@ -994,15 +1008,28 @@ def sync_bank_transactions(self, connection_id: int):
                         trans.save()
                         new_transactions.append(trans)
 
+                except RateLimitExceeded as e:
+                    until = now() + e.retry_after
+                    connection.mark_rate_limited(
+                        until,
+                        message=f"Rate limit on transactions for account {account_id}: {e}",
+                    )
+                    logger.warning(
+                        f"Rate limited syncing connection {connection_id} "
+                        f"account {account_id}; paused until {until}"
+                    )
+                    # Count partial progress if we already fetched at least one account
+                    if fetched_any:
+                        connection.record_sync_success()
+                    return
                 except Exception as e:
                     logger.error(f"Error fetching transactions for account {account_id}: {e}")
                     continue
 
-            # Update connection
-            connection.last_sync = now()
-            connection.sync_count_today += 1
-            old_status = connection.status
-            connection.save(update_fields=['last_sync', 'sync_count_today'])
+            if fetched_any:
+                connection.record_sync_success()
+            else:
+                logger.warning(f"No transaction fetches succeeded for connection {connection_id}")
 
             # Match new transactions
             if new_transactions:
@@ -1027,6 +1054,11 @@ def sync_bank_transactions(self, connection_id: int):
                         except Exception as e:
                             logger.error(f"Failed to send expiry notification for connection {connection_id}: {e}")
 
+        except RateLimitExceeded as e:
+            until = now() + e.retry_after
+            connection.mark_rate_limited(until, message=str(e))
+            logger.warning(f"Rate limited before sync for connection {connection_id}: {e}")
+            return
         except Exception as e:
             logger.error(f"Error syncing transactions for connection {connection_id}: {e}")
             old_status = connection.status
