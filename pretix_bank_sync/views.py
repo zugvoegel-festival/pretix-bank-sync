@@ -3,7 +3,6 @@ Views for Bank Sync plugin.
 
 Control panel views for setup, authorization, and transaction management.
 """
-import json
 import logging
 from datetime import timedelta
 from decimal import Decimal
