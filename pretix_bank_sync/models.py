@@ -117,6 +117,25 @@ class BankConnection(LoggedModel):
 
         return self.sync_count_today < 4
 
+    def days_until_consent_expiry(self):
+        """Days until consent expires, or None if unknown."""
+        if not self.consent_expires_at:
+            return None
+        return (self.consent_expires_at.date() - now().date()).days
+
+    def is_expiring_soon(self, within_days=7):
+        """True when consent expires within the given window (inclusive)."""
+        days = self.days_until_consent_expiry()
+        return days is not None and 0 <= days <= within_days
+
+    def can_renew(self):
+        """Renew allowed after failure/expiry, or while still active but expiring soon."""
+        if self.status in (self.STATUS_EXPIRED, self.STATUS_ERROR):
+            return True
+        if self.status == self.STATUS_ACTIVE and self.is_expiring_soon(within_days=14):
+            return True
+        return False
+
     def reset_daily_counter(self):
         """Reset the daily sync counter."""
         today = now().date()
@@ -320,16 +339,20 @@ class TransactionMatchSuggestion(LoggedModel):
     """
     Stores match suggestions for transactions that need human approval.
     """
+    MATCH_TYPE_EVENT_ORDER = 'event_order'
     MATCH_TYPE_EXACT_CODE = 'exact_code'
     MATCH_TYPE_FUZZY_CODE = 'fuzzy_code'
     MATCH_TYPE_SENDER_NAME = 'sender_name'
     MATCH_TYPE_AMOUNT_ONLY = 'amount_only'
+    MATCH_TYPE_MANUAL = 'manual'
 
     MATCH_TYPE_CHOICES = (
+        (MATCH_TYPE_EVENT_ORDER, _('Event slug + order code')),
         (MATCH_TYPE_EXACT_CODE, _('Exact order code match')),
         (MATCH_TYPE_FUZZY_CODE, _('Order code within other words')),
         (MATCH_TYPE_SENDER_NAME, _('Sender name match')),
         (MATCH_TYPE_AMOUNT_ONLY, _('Amount match only')),
+        (MATCH_TYPE_MANUAL, _('Manually assigned')),
     )
 
     transaction = models.ForeignKey(

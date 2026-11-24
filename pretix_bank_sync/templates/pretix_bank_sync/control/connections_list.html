@@ -15,10 +15,58 @@
 {% block content %}
     <h1>{% trans "Bank Sync" %}</h1>
 
+    <p class="help-block">
+        {% blocktrans trimmed %}
+            One bank connection per organizer. A single authorization can cover multiple
+            accounts from that bank. Matching is organizer-wide using payment references
+            like <code>EVENTSLUG-ORDERCODE</code>.
+        {% endblocktrans %}
+    </p>
+
+    {% if expiring_soon %}
+        <div class="alert alert-warning">
+            <strong>{% trans "Reauthorization due soon" %}</strong>
+            {% blocktrans trimmed %}
+                Your bank consent expires within 7 days. Renew now to avoid interrupted syncs.
+            {% endblocktrans %}
+            {% if primary_connection %}
+                <form method="post" action="{% url 'plugins:pretix_bank_sync:connection_renew' organizer=organizer.slug connection_id=primary_connection.pk %}" style="display:inline; margin-left:8px;">
+                    {% csrf_token %}
+                    <button type="submit" class="btn btn-warning btn-sm">{% trans "Renew now" %}</button>
+                </form>
+            {% endif %}
+        </div>
+    {% endif %}
+
+    {% if pending_review_count %}
+        <div class="alert alert-info">
+            {% blocktrans trimmed count counter=pending_review_count %}
+                {{ counter }} transaction needs review.
+            {% plural %}
+                {{ counter }} transactions need review.
+            {% endblocktrans %}
+            <a href="{% url 'plugins:pretix_bank_sync:review_queue' organizer=organizer.slug %}" class="btn btn-default btn-sm">
+                {% trans "Open review queue" %}
+            </a>
+        </div>
+    {% endif %}
+
     <div class="bank-sync-margin-bottom">
-        <a href="{% url 'plugins:pretix_bank_sync:bank_setup_wizard' organizer=organizer.slug %}" class="btn btn-primary">
-            <span class="fa fa-plus"></span>
-            {% trans "Set up connection" %}
+        {% if has_connection %}
+            <a href="{% url 'plugins:pretix_bank_sync:bank_setup_wizard' organizer=organizer.slug %}" class="btn btn-default"
+               onclick="return confirm('{% trans "This replaces the existing bank connection for this organizer. Continue?" %}');">
+                <span class="fa fa-exchange"></span>
+                {% trans "Replace connection" %}
+            </a>
+        {% else %}
+            <a href="{% url 'plugins:pretix_bank_sync:bank_setup_wizard' organizer=organizer.slug %}" class="btn btn-primary">
+                <span class="fa fa-plus"></span>
+                {% trans "Connect bank account" %}
+            </a>
+        {% endif %}
+        <a href="{% url 'plugins:pretix_bank_sync:review_queue' organizer=organizer.slug %}" class="btn btn-default">
+            <span class="fa fa-check-square-o"></span>
+            {% trans "Review queue" %}
         </a>
         <a href="{% url 'plugins:pretix_bank_sync:settings' organizer=organizer.slug %}" class="btn btn-default">
             <span class="fa fa-cog"></span>
@@ -26,7 +74,7 @@
         </a>
         <a href="{% url 'plugins:pretix_bank_sync:transactions' organizer=organizer.slug %}" class="btn btn-default">
             <span class="fa fa-list"></span>
-            {% trans "Transactions" %}
+            {% trans "All transactions" %}
         </a>
         {% if stats.active %}
             <form method="post" action="{% url 'plugins:pretix_bank_sync:fetch_transactions' organizer=organizer.slug %}" style="display:inline;">
@@ -52,7 +100,7 @@
         <div class="col-sm-2 col-xs-6">
             <div class="stat-box">
                 <span class="stat-number">{{ stats.total }}</span>
-                <span class="stat-label">{% trans "Total" %}</span>
+                <span class="stat-label">{% trans "Connections" %}</span>
             </div>
         </div>
         <div class="col-sm-2 col-xs-6">
@@ -79,11 +127,36 @@
                 <span class="stat-label">{% trans "Error" %}</span>
             </div>
         </div>
+        <div class="col-sm-2 col-xs-6">
+            <div class="stat-box">
+                <span class="stat-number">{{ pending_review_count }}</span>
+                <span class="stat-label">{% trans "Need review" %}</span>
+            </div>
+        </div>
     </div>
+
+    {% if linked_accounts %}
+        <div class="panel panel-default">
+            <div class="panel-heading">
+                <h3 class="panel-title">{% trans "Linked accounts" %}</h3>
+            </div>
+            <div class="panel-body">
+                <ul class="list-unstyled">
+                    {% for account in linked_accounts %}
+                        <li>
+                            <code>{{ account.iban|default:account.id }}</code>
+                            {% if account.name %} — {{ account.name }}{% endif %}
+                            {% if account.currency %} ({{ account.currency }}){% endif %}
+                        </li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+    {% endif %}
 
     <div class="panel panel-default">
         <div class="panel-heading">
-            <h3 class="panel-title">{% trans "Connections" %}</h3>
+            <h3 class="panel-title">{% trans "Connection" %}</h3>
         </div>
         <div class="panel-body">
             {% if connections %}
@@ -107,6 +180,9 @@
                                         <span class="label label-{% if connection.status == 'active' %}success{% elif connection.status == 'pending' %}info{% elif connection.status == 'expired' %}warning{% else %}danger{% endif %}">
                                             {{ connection.get_status_display }}
                                         </span>
+                                        {% if connection.is_expiring_soon %}
+                                            <span class="label label-warning">{% trans "Expiring soon" %}</span>
+                                        {% endif %}
                                     </td>
                                     <td><code>{{ connection.requisition_id|truncatechars:24 }}</code></td>
                                     <td>
@@ -120,16 +196,21 @@
                                     <td>
                                         {% if connection.consent_expires_at %}
                                             {{ connection.consent_expires_at|date:"SHORT_DATE_FORMAT" }}
+                                            {% with days=connection.days_until_consent_expiry %}
+                                                {% if days is not None %}
+                                                    <small class="text-muted">({{ days }}d)</small>
+                                                {% endif %}
+                                            {% endwith %}
                                         {% else %}
                                             —
                                         {% endif %}
                                     </td>
                                     <td>{{ connection.transaction_count }}</td>
                                     <td class="text-right">
-                                        {% if connection.status == 'expired' or connection.status == 'error' %}
+                                        {% if connection.can_renew %}
                                             <form method="post" action="{% url 'plugins:pretix_bank_sync:connection_renew' organizer=organizer.slug connection_id=connection.pk %}" style="display:inline;">
                                                 {% csrf_token %}
-                                                <button type="submit" class="btn btn-sm btn-default">{% trans "Renew" %}</button>
+                                                <button type="submit" class="btn btn-sm btn-warning">{% trans "Renew" %}</button>
                                             </form>
                                         {% endif %}
                                         <a href="{% url 'plugins:pretix_bank_sync:connection_delete' organizer=organizer.slug pk=connection.pk %}" class="btn btn-sm btn-danger">
@@ -150,7 +231,7 @@
                 </div>
             {% else %}
                 <p class="text-muted">
-                    {% trans "No bank connections yet. Start the setup wizard to connect a bank account." %}
+                    {% trans "No bank connection yet. Connect a bank account to start syncing." %}
                 </p>
             {% endif %}
         </div>

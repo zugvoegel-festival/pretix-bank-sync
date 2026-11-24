@@ -6,6 +6,7 @@ Control panel views for setup, authorization, and transaction management.
 import json
 import logging
 from datetime import timedelta
+from decimal import Decimal
 from django import forms
 from django.contrib import messages
 from django.http import JsonResponse
@@ -23,7 +24,7 @@ from pretix.helpers.urls import build_absolute_uri
 
 from .models import BankConnection, BankTransaction, TransactionMatchSuggestion
 from .services.gocardless_service import GoCardlessService
-from .tasks import approve_match_suggestion
+from .tasks import approve_match_suggestion, _handle_transaction
 
 logger = logging.getLogger(__name__)
 
@@ -142,11 +143,50 @@ class BankConnectionsListView(OrganizerPermissionRequiredMixin, ListView):
             'error': connections.filter(status=BankConnection.STATUS_ERROR).count(),
         }
         
+        # Prefer a single connection per organizer; surface accounts + expiry UX
+        primary = connections.first()
+        linked_accounts = []
+        expiring_soon = False
+        if primary and primary.status == BankConnection.STATUS_ACTIVE:
+            expiring_soon = primary.is_expiring_soon(within_days=7)
+            client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
+            client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
+            if client_id and client_secret and primary.requisition_id:
+                try:
+                    redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
+                    callback_url = build_absolute_uri(
+                        'plugins:pretix_bank_sync:callback',
+                        kwargs={'organizer': organizer.slug},
+                    )
+                    service = GoCardlessService(
+                        client_id=client_id,
+                        client_secret=client_secret,
+                        redirect_uri=redirect_uri or callback_url,
+                    )
+                    linked_accounts = service.get_accounts(primary.requisition_id) or []
+                except Exception:
+                    logger.exception("Failed to load linked accounts for connection list")
+
+        pending_review = BankTransaction.objects.filter(
+            connection__organizer=organizer,
+            state__in=[
+                BankTransaction.STATE_PENDING_APPROVAL,
+                BankTransaction.STATE_NOMATCH,
+                BankTransaction.STATE_UNCHECKED,
+            ],
+        ).count()
+
         ctx.update({
             'organizer': organizer,
             'has_credentials': has_credentials,
             'stats': stats,
             'now': now(),
+            'primary_connection': primary,
+            'has_connection': bool(primary),
+            'linked_accounts': linked_accounts,
+            'expiring_soon': expiring_soon,
+            'pending_review_count': pending_review,
+            'single_connection_mode': True,
         })
         return ctx
 
@@ -792,10 +832,14 @@ class BankSyncCallbackView(View):
             status = requisition.get('status', '')
 
             if status == 'LN':  # Linked (authorized)
+                valid_days = service.consent_valid_days_from_requisition(requisition, default=90)
                 connection.status = BankConnection.STATUS_ACTIVE
-                connection.consent_expires_at = now() + timedelta(days=90)
+                connection.consent_expires_at = now() + timedelta(days=valid_days)
+                connection.consent_id = str(requisition.get('agreement') or connection.consent_id or '')
                 connection.last_error = ''
-                connection.save(update_fields=['status', 'consent_expires_at', 'last_error'])
+                connection.save(update_fields=[
+                    'status', 'consent_expires_at', 'consent_id', 'last_error'
+                ])
                 messages.success(request, _('Bank account connected successfully!'))
                 request.session.pop('gocardless_auth_link', None)
                 request.session.pop('gocardless_selected_institution', None)
@@ -885,6 +929,205 @@ class BankSyncTransactionsView(OrganizerPermissionRequiredMixin, PaginationMixin
             'state_filter': self.request.GET.get('state', ''),
         })
         return ctx
+
+
+class OrganizerTransactionReviewView(OrganizerPermissionRequiredMixin, PaginationMixin, ListView):
+    """Organizer-level queue for unclear / pending bank transactions."""
+    permission = 'can_change_organizer_settings'
+    template_name = 'pretix_bank_sync/control/review_queue.html'
+    context_object_name = 'transactions'
+    model = BankTransaction
+    paginate_by = 50
+
+    def get_queryset(self):
+        organizer = self.request.organizer
+        qs = BankTransaction.objects.filter(
+            connection__organizer=organizer,
+        ).select_related(
+            'connection', 'order', 'order__event', 'payment'
+        ).prefetch_related(
+            'match_suggestions', 'match_suggestions__order', 'match_suggestions__order__event'
+        )
+
+        state = self.request.GET.get('state', 'needs_review')
+        if state == 'needs_review':
+            qs = qs.filter(state__in=[
+                BankTransaction.STATE_PENDING_APPROVAL,
+                BankTransaction.STATE_NOMATCH,
+                BankTransaction.STATE_UNCHECKED,
+            ])
+        elif state:
+            qs = qs.filter(state=state)
+
+        return qs.order_by('-date', '-created')
+
+    def get_context_data(self, **kwargs):
+        ctx = super().get_context_data(**kwargs)
+        organizer = self.request.organizer
+        base = BankTransaction.objects.filter(connection__organizer=organizer)
+        ctx.update({
+            'organizer': organizer,
+            'state_filter': self.request.GET.get('state', 'needs_review'),
+            'events': organizer.events.all().order_by('name'),
+            'counts': {
+                'needs_review': base.filter(state__in=[
+                    BankTransaction.STATE_PENDING_APPROVAL,
+                    BankTransaction.STATE_NOMATCH,
+                    BankTransaction.STATE_UNCHECKED,
+                ]).count(),
+                'pending_approval': base.filter(state=BankTransaction.STATE_PENDING_APPROVAL).count(),
+                'nomatch': base.filter(state=BankTransaction.STATE_NOMATCH).count(),
+                'matched': base.filter(state=BankTransaction.STATE_MATCHED).count(),
+                'discarded': base.filter(state=BankTransaction.STATE_DISCARDED).count(),
+            },
+        })
+        return ctx
+
+
+class OrganizerTransactionDiscardView(OrganizerPermissionRequiredMixin, View):
+    permission = 'can_change_organizer_settings'
+
+    def post(self, request, *args, **kwargs):
+        organizer = request.organizer
+        trans = get_object_or_404(
+            BankTransaction,
+            pk=kwargs['transaction_id'],
+            connection__organizer=organizer,
+        )
+        trans.state = BankTransaction.STATE_DISCARDED
+        trans.order = None
+        trans.payment = None
+        trans.error_message = ''
+        trans.save(update_fields=['state', 'order', 'payment', 'error_message', 'updated'])
+        TransactionMatchSuggestion.objects.filter(
+            transaction=trans, is_approved__isnull=True
+        ).update(is_approved=False, reviewed_at=now(), reviewed_by=request.user)
+        messages.success(request, _('Transaction discarded.'))
+        return redirect(request.POST.get('next') or reverse(
+            'plugins:pretix_bank_sync:review_queue',
+            kwargs={'organizer': organizer.slug},
+        ))
+
+
+class OrganizerTransactionAssignView(OrganizerPermissionRequiredMixin, View):
+    """Manually assign a transaction to an order (event slug + order code)."""
+    permission = 'can_change_organizer_settings'
+
+    def post(self, request, *args, **kwargs):
+        organizer = request.organizer
+        trans = get_object_or_404(
+            BankTransaction,
+            pk=kwargs['transaction_id'],
+            connection__organizer=organizer,
+        )
+        event_slug = request.POST.get('event_slug', '').strip()
+        order_code = request.POST.get('order_code', '').strip().upper()
+        next_url = request.POST.get('next') or reverse(
+            'plugins:pretix_bank_sync:review_queue',
+            kwargs={'organizer': organizer.slug},
+        )
+
+        if not event_slug or not order_code:
+            messages.error(request, _('Event and order code are required.'))
+            return redirect(next_url)
+
+        event = Event.objects.filter(organizer=organizer, slug=event_slug).first()
+        if not event:
+            messages.error(request, _('Event not found.'))
+            return redirect(next_url)
+
+        from pretix.base.models import Order
+        order = Order.objects.filter(event=event, code=order_code).first()
+        if not order:
+            messages.error(request, _('Order not found.'))
+            return redirect(next_url)
+
+        try:
+            TransactionMatchSuggestion.objects.filter(
+                transaction=trans, is_approved__isnull=True
+            ).update(is_approved=False, reviewed_at=now(), reviewed_by=request.user)
+
+            TransactionMatchSuggestion.objects.create(
+                transaction=trans,
+                order=order,
+                match_type=TransactionMatchSuggestion.MATCH_TYPE_MANUAL,
+                confidence_score=1.0,
+                match_reason=_('Manually assigned by {user}').format(user=request.user),
+                amount_match=abs(trans.amount - order.pending_sum) < Decimal('0.01'),
+                amount_difference=trans.amount - order.pending_sum,
+                is_approved=True,
+                reviewed_at=now(),
+                reviewed_by=request.user,
+            )
+
+            trans.order = order
+            trans.state = BankTransaction.STATE_MATCHED
+            if trans.amount < order.pending_sum:
+                trans.is_partial_payment = True
+                trans.payment_group_id = f"{order.code}_{trans.date.isoformat()}"
+            _handle_transaction(
+                trans,
+                [(event.slug, order.code)],
+                {},
+                organizer,
+                amount=trans.amount,
+            )
+            messages.success(
+                request,
+                _('Transaction assigned to {event}-{code}.').format(
+                    event=event.slug, code=order.code
+                ),
+            )
+        except Exception as e:
+            logger.exception("Manual assign failed")
+            messages.error(request, _('Could not assign transaction: {}').format(str(e)))
+
+        return redirect(next_url)
+
+
+class OrganizerMatchApproveView(OrganizerPermissionRequiredMixin, View):
+    permission = 'can_change_organizer_settings'
+
+    def post(self, request, *args, **kwargs):
+        organizer = request.organizer
+        suggestion = get_object_or_404(
+            TransactionMatchSuggestion,
+            pk=kwargs['suggestion_id'],
+            transaction__connection__organizer=organizer,
+            is_approved__isnull=True,
+        )
+        try:
+            approve_match_suggestion(suggestion.pk, request.user)
+            messages.success(request, _('Match approved and transaction processed successfully.'))
+        except Exception as e:
+            logger.exception("Error approving match suggestion")
+            messages.error(request, _('Error approving match: {}').format(str(e)))
+        return redirect(request.POST.get('next') or reverse(
+            'plugins:pretix_bank_sync:review_queue',
+            kwargs={'organizer': organizer.slug},
+        ))
+
+
+class OrganizerMatchRejectView(OrganizerPermissionRequiredMixin, View):
+    permission = 'can_change_organizer_settings'
+
+    def post(self, request, *args, **kwargs):
+        organizer = request.organizer
+        suggestion = get_object_or_404(
+            TransactionMatchSuggestion,
+            pk=kwargs['suggestion_id'],
+            transaction__connection__organizer=organizer,
+            is_approved__isnull=True,
+        )
+        suggestion.is_approved = False
+        suggestion.reviewed_at = now()
+        suggestion.reviewed_by = request.user
+        suggestion.save()
+        messages.success(request, _('Match suggestion rejected.'))
+        return redirect(request.POST.get('next') or reverse(
+            'plugins:pretix_bank_sync:review_queue',
+            kwargs={'organizer': organizer.slug},
+        ))
 
 
 class BankInstitutionsAjaxView(OrganizerPermissionRequiredMixin, View):
@@ -1010,88 +1253,54 @@ class TransactionMatchReviewView(EventPermissionRequiredMixin, PaginationMixin, 
             'match_suggestions__order'
         )
         
-        # Filter to show:
-        # - Transactions matched to orders in this event
-        # - Transactions with pending suggestions for orders in this event
-        # - Unmatched transactions (no match, no suggestions) that could potentially match this event
+        # Event view: only this event's matches / suggestions.
+        # Organizer-wide unclear txs live in the organizer review queue.
         event_transaction_ids = set()
-        
-        # Matched transactions for this event
+
         matched = transactions.filter(order__event=event).values_list('id', flat=True)
         event_transaction_ids.update(matched)
-        
-        # Transactions with pending suggestions for this event
-        from .models import TransactionMatchSuggestion
+
         pending_suggestions = TransactionMatchSuggestion.objects.filter(
             transaction__connection__organizer=event.organizer,
             order__event=event,
             is_approved__isnull=True
         ).values_list('transaction_id', flat=True)
         event_transaction_ids.update(pending_suggestions)
-        
-        # Unmatched transactions (no match, no suggestions) that could potentially match this event
-        # Criteria: same currency as event, state is unchecked or nomatch, no approved suggestions
-        unmatched = transactions.filter(
-            state__in=[BankTransaction.STATE_UNCHECKED, BankTransaction.STATE_NOMATCH],
-            currency=event.currency,
-            order__isnull=True  # Not matched to any order
-        ).exclude(
-            # Exclude transactions that have any approved suggestions (they were reviewed and rejected)
-            match_suggestions__is_approved=True
-        ).values_list('id', flat=True)
-        event_transaction_ids.update(unmatched)
-        
-        # Return filtered transactions
+
         return transactions.filter(id__in=event_transaction_ids).order_by('-date', '-created')
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         event = get_object_or_404(Event, slug=self.kwargs['event'], organizer__slug=self.kwargs['organizer'])
         
-        # Get statistics for this event
-        from .models import TransactionMatchSuggestion
-        event_transaction_ids = set()
-        
-        # Matched transactions
-        matched = BankTransaction.objects.filter(
-            connection__organizer=event.organizer,
-            order__event=event
-        ).values_list('id', flat=True)
-        event_transaction_ids.update(matched)
-        
-        # Transactions with pending suggestions
-        pending_sug = TransactionMatchSuggestion.objects.filter(
-            transaction__connection__organizer=event.organizer,
-            order__event=event,
-            is_approved__isnull=True
-        ).values_list('transaction_id', flat=True)
-        event_transaction_ids.update(pending_sug)
-        
-        # Unmatched transactions
-        unmatched = BankTransaction.objects.filter(
-            connection__organizer=event.organizer,
-            state__in=[BankTransaction.STATE_UNCHECKED, BankTransaction.STATE_NOMATCH],
-            currency=event.currency,
-            order__isnull=True
-        ).exclude(
-            match_suggestions__is_approved=True
-        ).values_list('id', flat=True)
-        event_transaction_ids.update(unmatched)
-        
+        event_transaction_ids = set(
+            BankTransaction.objects.filter(
+                connection__organizer=event.organizer,
+                order__event=event,
+            ).values_list('id', flat=True)
+        )
+        event_transaction_ids.update(
+            TransactionMatchSuggestion.objects.filter(
+                transaction__connection__organizer=event.organizer,
+                order__event=event,
+                is_approved__isnull=True,
+            ).values_list('transaction_id', flat=True)
+        )
+
         all_transactions = BankTransaction.objects.filter(id__in=event_transaction_ids)
         ctx['total_transactions'] = all_transactions.count()
         ctx['pending_suggestions'] = TransactionMatchSuggestion.objects.filter(
             transaction__connection__organizer=event.organizer,
             order__event=event,
-            is_approved__isnull=True
+            is_approved__isnull=True,
         ).count()
-        ctx['matched_transactions'] = all_transactions.filter(state=BankTransaction.STATE_MATCHED).count()
-        ctx['pending_approval'] = all_transactions.filter(state=BankTransaction.STATE_PENDING_APPROVAL).count()
-        ctx['unmatched_transactions'] = all_transactions.filter(
-            state__in=[BankTransaction.STATE_UNCHECKED, BankTransaction.STATE_NOMATCH],
-            order__isnull=True
+        ctx['matched_transactions'] = all_transactions.filter(
+            state=BankTransaction.STATE_MATCHED
         ).count()
-        
+        ctx['pending_approval'] = all_transactions.filter(
+            state=BankTransaction.STATE_PENDING_APPROVAL
+        ).count()
+        ctx['unmatched_transactions'] = 0
         ctx['event'] = event
         ctx['organizer'] = event.organizer
         return ctx

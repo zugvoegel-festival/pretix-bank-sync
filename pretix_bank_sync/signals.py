@@ -31,6 +31,12 @@ def nav_organizer_settings(sender, request, organizer, **kwargs):
         return []
 
     url = resolve(request.path_info)
+    active_names = (
+        'connections_list', 'bank_setup_wizard', 'connection_delete',
+        'connection_renew', 'settings', 'transactions', 'review_queue',
+        'transaction_discard', 'transaction_assign',
+        'organizer_match_approve', 'organizer_match_reject',
+    )
     return [{
         'label': _('Bank Sync'),
         'url': reverse('plugins:pretix_bank_sync:connections_list', kwargs={
@@ -39,7 +45,7 @@ def nav_organizer_settings(sender, request, organizer, **kwargs):
         'parent': reverse('control:organizer.edit', kwargs={
             'organizer': organizer.slug
         }),
-        'active': url.namespace == 'plugins:pretix_bank_sync' and url.url_name in ('connections_list', 'bank_setup_wizard', 'connection_delete', 'connection_renew'),
+        'active': url.namespace == 'plugins:pretix_bank_sync' and url.url_name in active_names,
     }]
 
 

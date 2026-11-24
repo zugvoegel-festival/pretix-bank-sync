@@ -417,6 +417,74 @@ def _find_fuzzy_code_matches(reference_text, order_codes):
     return matches
 
 
+# Prefer classic pretix bank-transfer style references: EVENTSLUG-ORDERCODE
+EVENT_ORDER_PATTERN = re.compile(
+    r'(?i)\b([a-z0-9][a-z0-9._-]{0,62})\s*[-_/]\s*([a-z0-9]{3,20})\b'
+)
+
+
+def _suggestion_for_order(trans, order, match_type, match_reason, base_confidence):
+    amount_match = abs(trans.amount - order.pending_sum) < Decimal("0.01")
+    amount_diff = trans.amount - order.pending_sum
+    currency_match = trans.currency.upper() == order.event.currency.upper()
+    is_eur = trans.currency.upper() == 'EUR'
+
+    confidence = base_confidence
+    if amount_match and currency_match and is_eur:
+        confidence = min(1.0, base_confidence + 0.05)
+    elif not amount_match:
+        confidence = max(0.5, confidence - 0.1)
+    if not currency_match or not is_eur:
+        confidence = max(0.5, confidence - 0.1)
+
+    reason = match_reason
+    if not currency_match:
+        reason += f" (currency mismatch: {trans.currency} vs {order.event.currency})"
+    if not is_eur:
+        reason += f" (non-EUR currency: {trans.currency})"
+
+    return {
+        'order': order,
+        'match_type': match_type,
+        'confidence_score': confidence,
+        'match_reason': reason,
+        'amount_match': amount_match,
+        'amount_difference': amount_diff,
+    }
+
+
+def _find_event_order_matches(trans, pending_orders):
+    """Match EVENTSLUG-ORDERCODE (or EVENTSLUG/ORDERCODE) in remittance text."""
+    reference_text = trans.get_reference_text()
+    if not reference_text:
+        return []
+
+    by_key = {(o.event.slug.upper(), o.code.upper()): o for o in pending_orders}
+    seen = set()
+    suggestions = []
+
+    for match in EVENT_ORDER_PATTERN.finditer(reference_text):
+        slug = match.group(1).upper()
+        code = match.group(2).upper()
+        key = (slug, code)
+        if key in seen:
+            continue
+        order = by_key.get(key)
+        if not order:
+            continue
+        seen.add(key)
+        suggestions.append(
+            _suggestion_for_order(
+                trans,
+                order,
+                TransactionMatchSuggestion.MATCH_TYPE_EVENT_ORDER,
+                f"Event+order reference '{order.event.slug}-{order.code}' found in remittance",
+                base_confidence=1.0,
+            )
+        )
+    return suggestions
+
+
 def _generate_match_suggestions(trans: BankTransaction, organizer):
     """Generate match suggestions using multi-step fuzzy logic."""
     suggestions = []
@@ -436,6 +504,13 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
     
     # Get all order codes
     order_codes = list(pending_orders.values_list('code', flat=True))
+
+    # Step 0: EVENTSLUG-ORDERCODE (preferred, organizer-wide)
+    event_order_suggestions = _find_event_order_matches(trans, pending_orders)
+    if event_order_suggestions:
+        suggestions.extend(event_order_suggestions)
+        suggestions.sort(key=lambda x: x['confidence_score'], reverse=True)
+        return suggestions[:10]
     
     # Step 1: Exact order code match
     matched_orders = []
@@ -766,12 +841,15 @@ def match_transactions(connection: BankConnection):
                         amount_difference=sug.get('amount_difference', Decimal('0')),
                     )
         elif (auto_confirm and
-              best_suggestion['match_type'] == TransactionMatchSuggestion.MATCH_TYPE_EXACT_CODE and
+              best_suggestion['match_type'] in (
+                  TransactionMatchSuggestion.MATCH_TYPE_EXACT_CODE,
+                  TransactionMatchSuggestion.MATCH_TYPE_EVENT_ORDER,
+              ) and
               best_suggestion['confidence_score'] >= 0.95 and
               best_suggestion['amount_match'] and
               is_eur and
               currency_match):
-            # Auto-approve high-confidence exact matches with EUR currency (single order)
+            # Auto-approve high-confidence event+order / exact code matches (EUR)
             order = best_suggestion['order']
             trans.order = order
             trans.state = BankTransaction.STATE_MATCHED

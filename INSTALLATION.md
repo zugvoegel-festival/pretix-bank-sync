@@ -76,7 +76,9 @@ python -m pretix migrate pretix_bank_sync
 
 ## Behaviour
 
-1. Periodic sync runs up to 4 times per day per active connection
-2. Matching uses order codes / remittance text, sender name, and amount
-3. High-confidence EUR exact matches auto-confirm when `pretix_bank_sync_auto_confirm` is enabled (default)
-4. Other matches appear under Event → Bank Transactions for approve/reject
+1. One bank connection per organizer (multiple accounts under that consent OK)
+2. Periodic sync runs up to 4 times per day per active connection
+3. Prefer payment references `EVENTSLUG-ORDERCODE`; also matches order code / sender / amount
+4. High-confidence EUR event+order or exact matches auto-confirm when `pretix_bank_sync_auto_confirm` is enabled (default)
+5. Unclear matches: **Organizer → Bank Sync → Review queue** (approve / assign / discard); event view shows that event’s matches
+6. Consent expiry: email (~7 days) to users with organizer settings permission; **Renew** available while active if ≤14 days left

@@ -30,6 +30,12 @@ Configuration
 3. Register the plugin callback URL as a redirect URI if required
 4. Complete the bank authorization wizard
 
+One bank connection per organizer (multiple accounts under that consent are OK).
+Matching is organizer-wide; ask buyers to use ``EVENTSLUG-ORDERCODE`` as the
+transfer reference. Unclear matches appear in **Organizer → Bank Sync → Review queue**.
+Consent expiry warnings are emailed to users with organizer settings permission;
+renew from the connections page while still active if expiry is within 14 days.
+
 See ``INSTALLATION.md`` for detailed steps.
 
 License

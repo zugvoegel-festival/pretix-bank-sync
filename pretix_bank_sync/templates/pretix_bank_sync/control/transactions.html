@@ -17,6 +17,7 @@
                         <option value="">{% trans "All" %}</option>
                         <option value="unchecked" {% if state_filter == 'unchecked' %}selected{% endif %}>{% trans "Unchecked" %}</option>
                         <option value="nomatch" {% if state_filter == 'nomatch' %}selected{% endif %}>{% trans "No match" %}</option>
+                        <option value="pending_approval" {% if state_filter == 'pending_approval' %}selected{% endif %}>{% trans "Pending approval" %}</option>
                         <option value="matched" {% if state_filter == 'matched' %}selected{% endif %}>{% trans "Matched" %}</option>
                         <option value="error" {% if state_filter == 'error' %}selected{% endif %}>{% trans "Error" %}</option>
                         <option value="duplicate" {% if state_filter == 'duplicate' %}selected{% endif %}>{% trans "Duplicate" %}</option>
@@ -98,9 +99,12 @@
     </div>
 
     <div class="form-group">
-        <a href="{% url 'plugins:pretix_bank_sync:settings' organizer=organizer.slug %}" class="btn btn-default">
+        <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-default">
             <span class="fa fa-arrow-left"></span>
-            {% trans "Back to settings" %}
+            {% trans "Back to Bank Sync" %}
+        </a>
+        <a href="{% url 'plugins:pretix_bank_sync:review_queue' organizer=organizer.slug %}" class="btn btn-default">
+            {% trans "Review queue" %}
         </a>
     </div>
 {% endblock %}
