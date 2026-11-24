@@ -24,6 +24,13 @@ from pretix.helpers.urls import build_absolute_uri
 
 from .models import BankConnection, BankTransaction, TransactionMatchSuggestion
 from .services.gocardless_service import GoCardlessService
+from .services.credentials import (
+    get_gocardless_credentials,
+    has_gocardless_credentials,
+    set_gocardless_credentials,
+    secret_is_configured,
+)
+from .services.redact import mask_iban
 from .tasks import approve_match_suggestion, _handle_transaction
 
 logger = logging.getLogger(__name__)
@@ -127,11 +134,7 @@ class BankConnectionsListView(OrganizerPermissionRequiredMixin, ListView):
         ctx = super().get_context_data(**kwargs)
         organizer = self.request.organizer
         
-        # Get GoCardless credentials status
-        has_credentials = bool(
-            organizer.settings.get('pretix_bank_sync_gocardless_client_id', '') and
-            organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-        )
+        has_credentials = has_gocardless_credentials(organizer)
         
         # Get connection stats
         connections = self.get_queryset()
@@ -149,11 +152,9 @@ class BankConnectionsListView(OrganizerPermissionRequiredMixin, ListView):
         expiring_soon = False
         if primary and primary.status == BankConnection.STATUS_ACTIVE:
             expiring_soon = primary.is_expiring_soon(within_days=7)
-            client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-            client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
+            client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
             if client_id and client_secret and primary.requisition_id:
                 try:
-                    redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
                     callback_url = build_absolute_uri(
                         'plugins:pretix_bank_sync:callback',
                         kwargs={'organizer': organizer.slug},
@@ -163,7 +164,14 @@ class BankConnectionsListView(OrganizerPermissionRequiredMixin, ListView):
                         client_secret=client_secret,
                         redirect_uri=redirect_uri or callback_url,
                     )
-                    linked_accounts = service.get_accounts(primary.requisition_id) or []
+                    accounts = service.get_accounts(primary.requisition_id) or []
+                    linked_accounts = []
+                    for account in accounts:
+                        account = dict(account)
+                        if account.get('iban'):
+                            account['iban_masked'] = mask_iban(account.get('iban', ''))
+                            account.pop('iban', None)
+                        linked_accounts.append(account)
                 except Exception:
                     logger.exception("Failed to load linked accounts for connection list")
 
@@ -232,9 +240,7 @@ class BankConnectionRenewView(OrganizerPermissionRequiredMixin, View):
             messages.error(request, _('Connection not found.'))
             return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
         
-        # Check if credentials are configured
-        client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-        client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
+        client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
         
         if not client_id or not client_secret:
             messages.error(request, _('GoCardless credentials not configured. Please configure them first.'))
@@ -242,7 +248,6 @@ class BankConnectionRenewView(OrganizerPermissionRequiredMixin, View):
         
         # Get requisition to find institution_id
         try:
-            redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
             callback_url = build_absolute_uri(
                 'plugins:pretix_bank_sync:callback',
                 kwargs={'organizer': organizer.slug}
@@ -318,12 +323,12 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
         steps = get_bank_setup_steps(current_step_key=step, connection=connection)
         current_step = next((s for s in steps if s['status'] == 'active'), steps[0])
         
-        # Get GoCardless settings (check session for temporary values from test)
+        # Never put the secret into session/template. Non-secret fields may use session.
         session_creds = self.request.session.get('wizard_credentials', {})
-        client_id = session_creds.get('client_id', organizer.settings.get('pretix_bank_sync_gocardless_client_id', ''))
-        # Use session value if available (from test), otherwise use saved setting
-        client_secret = session_creds.get('client_secret', organizer.settings.get('pretix_bank_sync_gocardless_client_secret', ''))
-        redirect_uri = session_creds.get('redirect_uri', organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', ''))
+        stored_id, stored_secret, stored_redirect = get_gocardless_credentials(organizer)
+        client_id = session_creds.get('client_id', stored_id)
+        redirect_uri = session_creds.get('redirect_uri', stored_redirect)
+        has_secret = secret_is_configured(organizer)
         
         # Build callback URL
         callback_url = build_absolute_uri(
@@ -338,51 +343,25 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             'current_step': current_step,
             'connection': connection,
             'client_id': client_id,
-            'client_secret': client_secret,
             'redirect_uri': redirect_uri,
             'callback_url': callback_url,
-            'has_credentials': bool(client_id and client_secret),
+            'has_credentials': bool(client_id and has_secret),
+            'secret_configured': has_secret,
+            # Never pass plaintext secret to templates
+            'client_secret': '',
         })
         
         # Step-specific context
-        if step == 'credentials' and client_id and client_secret:
-            # Test connection on credentials step by making a real API call
-            try:
-                service = GoCardlessService(
-                    client_id=client_id,
-                    client_secret=client_secret,
-                    redirect_uri=redirect_uri or callback_url
-                )
-                # Actually test credentials by trying to list institutions
-                # This verifies both authentication and API access
-                try:
-                    institutions = service.list_institutions(country='GB')  # Test with a common country
-                    # If we get here, credentials are valid
-                    ctx['credentials_valid'] = True
-                    ctx['credentials_test_message'] = _('Credentials verified successfully. API connection working.')
-                except Exception as api_error:
-                    # Check if it's an authentication error
-                    error_msg = str(api_error)
-                    if 'authenticate' in error_msg.lower() or 'token' in error_msg.lower() or '401' in error_msg or '403' in error_msg:
-                        ctx['credentials_valid'] = False
-                        ctx['credentials_error'] = _('Authentication failed. Please check your Secret ID and Secret Key.')
-                    else:
-                        # Other API errors might be network or API issues, but credentials might be valid
-                        # Still mark as valid if we got past authentication
-                        ctx['credentials_valid'] = True
-                        ctx['credentials_test_message'] = _('Credentials appear valid, but API call failed: {}').format(error_msg)
-                        logger.warning(f"Credentials test: API call failed but auth succeeded: {api_error}")
-            except Exception as e:
-                ctx['credentials_valid'] = False
-                ctx['credentials_error'] = _('Failed to test credentials: {}').format(str(e))
-                logger.exception("Error testing credentials")
+        if step == 'credentials' and client_id and stored_secret and self.request.GET.get('tested'):
+            ctx['credentials_valid'] = True
+            ctx['credentials_test_message'] = _('Credentials verified successfully. API connection working.')
         
         elif step == 'select_country':
             # Get selected country from session if available
             selected_country = self.request.session.get('gocardless_selected_country', '')
             ctx['selected_country'] = selected_country
         
-        elif step == 'select_bank' and client_id and client_secret:
+        elif step == 'select_bank' and client_id and has_secret:
             # Get selected country from session
             selected_country = self.request.session.get('gocardless_selected_country', '')
             ctx['selected_country'] = selected_country
@@ -418,20 +397,23 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             try:
                 service = GoCardlessService(
                     client_id=client_id,
-                    client_secret=client_secret,
+                    client_secret=stored_secret,
                     redirect_uri=redirect_uri or callback_url
                 )
                 requisition = service.get_requisition(connection.requisition_id)
                 ctx['requisition'] = requisition
                 ctx['requisition_status'] = requisition.get('status', '')
                 
-                # Get accounts if available
+                # Get accounts if available (IBANs masked for display)
                 account_ids = requisition.get('accounts', [])
                 if account_ids:
                     accounts = []
                     for account_id in account_ids:
                         account = service.get_account_details(account_id)
                         if account:
+                            account = dict(account)
+                            if account.get('iban'):
+                                account['iban'] = mask_iban(account.get('iban', ''))
                             accounts.append(account)
                     ctx['accounts'] = accounts
             except Exception as e:
@@ -442,7 +424,7 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             try:
                 service = GoCardlessService(
                     client_id=client_id,
-                    client_secret=client_secret,
+                    client_secret=stored_secret,
                     redirect_uri=redirect_uri or callback_url
                 )
                 requisition = service.get_requisition(connection.requisition_id)
@@ -452,7 +434,10 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                     # Test balances on first account
                     account_id = account_ids[0]
                     balances = service.get_balances(account_id)
-                    account_details = service.get_account_details(account_id)
+                    account_details = service.get_account_details(account_id) or {}
+                    if account_details.get('iban'):
+                        account_details = dict(account_details)
+                        account_details['iban'] = mask_iban(account_details.get('iban', ''))
                     
                     ctx['test_account_id'] = account_id
                     ctx['test_balances'] = balances
@@ -475,14 +460,18 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             client_id = request.POST.get('client_id', '').strip()
             client_secret = request.POST.get('client_secret', '').strip()
             redirect_uri = request.POST.get('redirect_uri', '').strip()
+            _, existing_secret, _ = get_gocardless_credentials(organizer)
+            secret_for_use = client_secret or existing_secret
             
             # Handle test action
             if action == 'test':
-                if not client_id or not client_secret:
-                    messages.error(request, _('Please enter both Client ID and Client Secret to test.'))
+                if not client_id or not secret_for_use:
+                    messages.error(
+                        request,
+                        _('Please enter Secret ID and Secret Key (or keep an existing key) to test.'),
+                    )
                     return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=credentials")
                 
-                # Test credentials
                 callback_url = build_absolute_uri(
                     'plugins:pretix_bank_sync:callback',
                     kwargs={'organizer': organizer.slug}
@@ -491,11 +480,17 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                 try:
                     service = GoCardlessService(
                         client_id=client_id,
-                        client_secret=client_secret,
+                        client_secret=secret_for_use,
                         redirect_uri=redirect_uri or callback_url,
                     )
-                    # Actually test credentials by trying to list institutions
-                    institutions = service.list_institutions(country='GB')
+                    service.list_institutions(country='GB')
+                    # Persist immediately (encrypted) so the secret never sits in session/HTML
+                    set_gocardless_credentials(
+                        organizer,
+                        client_id=client_id,
+                        client_secret=client_secret if client_secret else None,
+                        redirect_uri=redirect_uri,
+                    )
                     messages.success(request, _('Credentials test successful! Your credentials are valid and can connect to GoCardless API.'))
                 except Exception as e:
                     error_msg = str(e)
@@ -505,30 +500,30 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                         messages.warning(request, _('Credentials test failed: {}').format(error_msg))
                     logger.exception("Error testing credentials")
                 
-                # Store form values in session temporarily so they persist after redirect
-                # Note: client_secret is stored temporarily for form preservation only
+                # Non-secret fields only in session
                 request.session['wizard_credentials'] = {
                     'client_id': client_id,
-                    'client_secret': client_secret,  # Temporary storage for form preservation
                     'redirect_uri': redirect_uri,
                 }
-                # Redirect back to credentials step
                 return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=credentials&tested=1")
             
-            # Save credentials
-            if not client_id or not client_secret:
-                messages.error(request, _('Client ID and Client Secret are required.'))
+            # Save credentials (empty secret keeps existing encrypted value)
+            if not client_id:
+                messages.error(request, _('Secret ID is required.'))
+                return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=credentials")
+            if not secret_for_use:
+                messages.error(request, _('Secret Key is required.'))
                 return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=credentials")
             
-            organizer.settings.set('pretix_bank_sync_gocardless_client_id', client_id)
-            organizer.settings.set('pretix_bank_sync_gocardless_client_secret', client_secret)
-            organizer.settings.set('pretix_bank_sync_gocardless_redirect_uri', redirect_uri)
-            
-            # Clear session data after saving
+            set_gocardless_credentials(
+                organizer,
+                client_id=client_id,
+                client_secret=client_secret if client_secret else None,
+                redirect_uri=redirect_uri,
+            )
             request.session.pop('wizard_credentials', None)
             
             messages.success(request, _('Credentials saved successfully.'))
-            # Continue to select_country step
             return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=select_country")
         
         elif step == 'select_country':
@@ -542,9 +537,7 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
             request.session['gocardless_selected_country'] = country
             
             # Preload banks for the selected country
-            client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-            client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-            redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
+            client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
             
             if client_id and client_secret:
                 try:
@@ -619,9 +612,7 @@ class BankSetupWizardView(OrganizerPermissionRequiredMixin, TemplateView):
                 return redirect(f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=select_bank")
             
             # Create requisition
-            client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-            client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-            redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
+            client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
             callback_url = build_absolute_uri(
                 'plugins:pretix_bank_sync:callback',
                 kwargs={'organizer': organizer.slug}
@@ -714,9 +705,9 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
             recent_transactions = []
         
         # GoCardless settings
-        gocardless_client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-        gocardless_client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
+        gocardless_client_id, _, _ = get_gocardless_credentials(organizer)
         auto_confirm = organizer.settings.get('pretix_bank_sync_auto_confirm', True)
+        secret_configured = secret_is_configured(organizer)
         
         # Get active tab from request
         active_tab = self.request.GET.get('tab', 'gocardless')  # Default to GoCardless tab
@@ -726,7 +717,7 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
             'connection': connection,
             'recent_transactions': recent_transactions,
             'gocardless_client_id': gocardless_client_id,
-            'gocardless_client_secret': gocardless_client_secret,
+            'secret_configured': secret_configured,
             'auto_confirm': auto_confirm,
             'active_tab': active_tab,
         })
@@ -743,8 +734,12 @@ class BankSyncSettingsView(OrganizerPermissionRequiredMixin, TemplateView):
             client_secret = request.POST.get('gocardless_client_secret', '').strip()
             auto_confirm = request.POST.get('auto_confirm') == 'on'
             
-            organizer.settings.set('pretix_bank_sync_gocardless_client_id', client_id)
-            organizer.settings.set('pretix_bank_sync_gocardless_client_secret', client_secret)
+            # Empty secret field = keep existing encrypted secret
+            set_gocardless_credentials(
+                organizer,
+                client_id=client_id,
+                client_secret=client_secret if client_secret else None,
+            )
             organizer.settings.set('pretix_bank_sync_auto_confirm', auto_confirm)
             
             messages.success(request, _('GoCardless settings saved successfully.'))
@@ -813,9 +808,7 @@ class BankSyncCallbackView(View):
                 messages.error(request, _('No pending connection found.'))
                 return redirect(list_url)
 
-            client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-            client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-            redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
+            client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
 
             callback_url = build_absolute_uri(
                 'plugins:pretix_bank_sync:callback',
@@ -874,9 +867,7 @@ class BankSyncFetchTransactionsView(OrganizerPermissionRequiredMixin, View):
             return redirect('plugins:pretix_bank_sync:connections_list', organizer=organizer.slug)
         
         # Get GoCardless settings
-        client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-        client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-        redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
+        client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
         
         if not client_id or not client_secret:
             messages.error(request, _('GoCardless credentials not configured.'))
@@ -1142,9 +1133,7 @@ class BankInstitutionsAjaxView(OrganizerPermissionRequiredMixin, View):
         query = request.GET.get('query', '').lower()
         
         # Get GoCardless settings
-        client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-        client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-        redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
+        client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
         
         if not client_id or not client_secret:
             return JsonResponse({

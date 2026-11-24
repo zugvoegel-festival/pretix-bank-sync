@@ -42,7 +42,9 @@ pip install .
 3. **Configure credentials**:
    - Organizer → Bank Sync → Settings (or the setup wizard)
    - Enter GoCardless Bank Account Data Secret ID and Secret Key
+   - The Secret Key is encrypted at rest (Fernet via pretix `SECRET_KEY`) and never shown again; leave blank to keep the current key
    - Optional: set Redirect URI; otherwise the plugin callback URL is used
+   - Rotating pretix `SECRET_KEY` will invalidate stored GoCardless secrets — re-enter them after a key rotation
 
 4. **Connect a bank account**:
    - Organizer → Bank Sync → Set up connection

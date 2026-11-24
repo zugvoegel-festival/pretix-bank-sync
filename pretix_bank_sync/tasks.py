@@ -30,6 +30,7 @@ from pretix.celery_app import app
 from .models import BankConnection, BankTransaction, TransactionMatchSuggestion
 from .services.gocardless_service import GoCardlessService
 from .services.notifications import send_connection_notification
+from .services.credentials import get_gocardless_credentials
 
 logger = logging.getLogger(__name__)
 
@@ -903,9 +904,7 @@ def sync_bank_transactions(self, connection_id: int):
 
         # Get settings
         organizer = connection.organizer
-        client_id = organizer.settings.get('pretix_bank_sync_gocardless_client_id', '')
-        client_secret = organizer.settings.get('pretix_bank_sync_gocardless_client_secret', '')
-        redirect_uri = organizer.settings.get('pretix_bank_sync_gocardless_redirect_uri', '')
+        client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
 
         if not client_id or not client_secret:
             logger.error(f"GoCardless credentials not configured for organizer {organizer.slug}")
