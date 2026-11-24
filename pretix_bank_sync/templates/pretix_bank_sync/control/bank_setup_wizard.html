@@ -118,57 +118,43 @@
             {% elif step == 'select_bank' %}
                 {% if not selected_country %}
                     <div class="alert alert-warning">{% trans "Please select a country first." %}</div>
+                    <p>
+                        <a class="btn btn-default" href="?step=select_country">{% trans "Select country" %}</a>
+                    </p>
                 {% else %}
                     <p>{% blocktrans %}Country: <strong>{{ selected_country }}</strong>{% endblocktrans %}</p>
-                    <form method="post" action="" id="bank-select-form">
-                        {% csrf_token %}
-                        <input type="hidden" name="step" value="select_bank">
-                        <div class="form-group">
-                            <label for="institution_id">{% trans "Bank" %}</label>
-                            <select name="institution_id" id="institution_id" class="form-control" required>
-                                <option value="">{% trans "— Loading banks… —" %}</option>
-                            </select>
+                    {% if institutions_error %}
+                        <div class="alert alert-warning">{{ institutions_error }}</div>
+                    {% endif %}
+                    {% if institutions %}
+                        <form method="post" action="" id="bank-select-form">
+                            {% csrf_token %}
+                            <input type="hidden" name="step" value="select_bank">
+                            <div class="form-group">
+                                <label for="institution_id">{% trans "Bank" %}</label>
+                                {# Options are server-rendered: pretix CSP blocks inline scripts. #}
+                                <select name="institution_id" id="institution_id" class="form-control" required>
+                                    <option value="">{% trans "— Select a bank —" %}</option>
+                                    {% for inst in institutions %}
+                                        <option value="{{ inst.id }}" {% if selected_institution == inst.id %}selected{% endif %}>
+                                            {{ inst.name }}{% if inst.bic %} ({{ inst.bic }}){% endif %}
+                                        </option>
+                                    {% endfor %}
+                                </select>
+                            </div>
+                            <div class="form-group submit-group">
+                                <button type="submit" class="btn btn-primary">{% trans "Continue" %}</button>
+                            </div>
+                        </form>
+                    {% else %}
+                        <div class="alert alert-warning">
+                            {% trans "No banks available for this country. Go back and try again, or pick another country." %}
                         </div>
-                        <div class="form-group submit-group">
-                            <button type="submit" class="btn btn-primary">{% trans "Continue" %}</button>
-                        </div>
-                    </form>
-                    <script type="application/json" id="preloaded-institutions">{{ preloaded_institutions_json|default:"[]"|safe }}</script>
-                    <script>
-                    (function () {
-                        var select = document.getElementById('institution_id');
-                        var preloaded = [];
-                        try {
-                            preloaded = JSON.parse(document.getElementById('preloaded-institutions').textContent || '[]');
-                        } catch (e) {}
-                        function fill(list) {
-                            select.innerHTML = '';
-                            var empty = document.createElement('option');
-                            empty.value = '';
-                            empty.textContent = '{% trans "— Select a bank —" %}';
-                            select.appendChild(empty);
-                            (list || []).forEach(function (inst) {
-                                var opt = document.createElement('option');
-                                opt.value = inst.id || inst.bic || '';
-                                opt.textContent = inst.name + (inst.bic ? ' (' + inst.bic + ')' : '');
-                                select.appendChild(opt);
-                            });
-                        }
-                        if (preloaded && preloaded.length) {
-                            fill(preloaded);
-                        } else {
-                            var url = '{% url "plugins:pretix_bank_sync:institutions_ajax" organizer=organizer.slug %}?country={{ selected_country|urlencode }}';
-                            fetch(url, {credentials: 'same-origin'})
-                                .then(function (r) { return r.json(); })
-                                .then(function (data) { fill(data.results || []); })
-                                .catch(function () {
-                                    select.innerHTML = '<option value="">{% trans "Failed to load banks" %}</option>';
-                                });
-                        }
-                    })();
-                    </script>
+                        <p>
+                            <a class="btn btn-default" href="?step=select_country">{% trans "Change country" %}</a>
+                        </p>
+                    {% endif %}
                 {% endif %}
-
             {% elif step == 'create_requisition' %}
                 <p>
                     {% if selected_institution %}
