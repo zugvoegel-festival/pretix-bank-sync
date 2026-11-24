@@ -17,10 +17,10 @@ from .models import BankConnection
 
 logger = logging.getLogger(__name__)
 
-# Register plugin settings defaults
-settings_hierarkey.add_default("pretix_bank_sync_client_id", "", str)
-settings_hierarkey.add_default("pretix_bank_sync_client_secret", "", str)
-settings_hierarkey.add_default("pretix_bank_sync_redirect_uri", "", str)
+# Register plugin settings defaults (keys must match views/tasks)
+settings_hierarkey.add_default("pretix_bank_sync_gocardless_client_id", "", str)
+settings_hierarkey.add_default("pretix_bank_sync_gocardless_client_secret", "", str)
+settings_hierarkey.add_default("pretix_bank_sync_gocardless_redirect_uri", "", str)
 settings_hierarkey.add_default("pretix_bank_sync_auto_confirm", True, bool)
 
 

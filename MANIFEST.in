@@ -1,0 +1,7 @@
+include LICENSE
+include README.rst
+include INSTALLATION.md
+include pretixplugin.toml
+recursive-include pretix_bank_sync/templates *
+recursive-include pretix_bank_sync/static *
+recursive-include pretix_bank_sync/locale *

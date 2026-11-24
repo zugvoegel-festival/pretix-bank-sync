@@ -1,14 +1,11 @@
 pretix Bank Sync Plugin
 ========================
 
-This plugin integrates with Enable Banking Open Banking API to:
+This plugin integrates with GoCardless Bank Account Data (formerly Nordigen) to:
 
 - Sync bank account transactions up to 4 times per day
 - Automatically match transactions to orders/payments
 - Manage bank connection lifecycle (setup, authorization, reauthorization)
-
-Enable Banking is an EU-based (Finland) provider offering PSD2-compliant
-Account Information Services (AIS) across 2,500+ banks in 29 European countries.
 
 Installation
 ------------
@@ -17,21 +14,27 @@ Install the plugin using pip::
 
     pip install pretix-bank-sync
 
-Then enable it in your pretix configuration.
+Or in development mode from a checkout::
+
+    pip install -e .
+
+Then enable the plugin for your organizer in pretix control, run migrations,
+and configure GoCardless credentials in **Organizer → Bank Sync**.
 
 Configuration
 -------------
 
-Configure your Enable Banking API credentials in the plugin settings.
+1. Create a free Bank Account Data account at
+   https://bankaccountdata.gocardless.com/
+2. Copy your Secret ID and Secret Key into the plugin settings / setup wizard
+3. Register the plugin callback URL as a redirect URI if required
+4. Complete the bank authorization wizard
 
-You can sign up for Enable Banking at https://enablebanking.com/
-
-
-https://bankaccountdata.gocardless.com/overview/
+See ``INSTALLATION.md`` for detailed steps.
 
 License
 -------
 
-Copyright 2024 pretix
+Copyright 2024–2026 Zugvögel Festival / pretix contributors
 
 Licensed under the Apache License, Version 2.0

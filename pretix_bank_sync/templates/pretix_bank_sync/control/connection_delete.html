@@ -1,0 +1,23 @@
+{% extends "pretixcontrol/base.html" %}
+{% load i18n %}
+
+{% block title %}{% trans "Delete bank connection" %}{% endblock %}
+
+{% block content %}
+    <h1>{% trans "Delete bank connection" %}</h1>
+
+    <div class="alert alert-danger">
+        {% blocktrans trimmed with req=connection.requisition_id %}
+            Are you sure you want to delete the bank connection
+            <code>{{ req }}</code>? Synced transactions for this connection will also be removed.
+        {% endblocktrans %}
+    </div>
+
+    <form method="post" action="">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-danger">{% trans "Delete" %}</button>
+        <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=request.organizer.slug %}" class="btn btn-default">
+            {% trans "Cancel" %}
+        </a>
+    </form>
+{% endblock %}

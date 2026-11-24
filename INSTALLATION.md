@@ -7,96 +7,76 @@ If you're developing or testing the plugin locally:
 1. **Activate your pretix virtual environment** (if you have one):
    ```bash
    source /path/to/pretix/venv/bin/activate
-   # or
-   source env/bin/activate
    ```
 
 2. **Install the plugin in development mode**:
    ```bash
-   cd /Users/manuel.huettel/Repos/privat/pretix/local/pretix-bank-sync
+   cd /path/to/pretix-bank-sync
    pip install -e .
    ```
 
    This will:
-   - Install the plugin and its dependencies (including `gocardless-pro`)
+   - Install the plugin and its dependency (`requests`)
    - Make the plugin discoverable by pretix
    - Allow you to edit the code without reinstalling
 
 ## Production Installation
 
-For production use:
-
-1. **Install from the directory**:
-   ```bash
-   cd /Users/manuel.huettel/Repos/privat/pretix/local/pretix-bank-sync
-   pip install .
-   ```
-
-2. **Or install from a wheel** (if you've built one):
-   ```bash
-   pip install pretix-bank-sync-*.whl
-   ```
+```bash
+pip install pretix-bank-sync
+# or from a local checkout:
+pip install .
+```
 
 ## Enable the Plugin
 
-After installation:
-
-1. **Run migrations** (if needed):
+1. **Run migrations**:
    ```bash
-   python src/manage.py migrate pretix_bank_sync
+   python -m pretix migrate pretix_bank_sync
    ```
 
 2. **Enable the plugin in pretix**:
-   - Go to your organizer settings
-   - Navigate to "Plugins"
-   - Find "Bank Sync" in the list
-   - Click "Enable"
+   - Organizer settings → Plugins → enable **Bank Sync**
+   - Restart the pretix web process and Celery workers
 
-3. **Configure the plugin**:
-   - Go to Organizer Settings → Bank Sync
-   - Enter your GoCardless API credentials:
-     - Client ID
-     - Client Secret
-     - Redirect URI (configured in GoCardless dashboard)
-   - Choose Sandbox or Production environment
-   - Save settings
+3. **Configure credentials**:
+   - Organizer → Bank Sync → Settings (or the setup wizard)
+   - Enter GoCardless Bank Account Data Secret ID and Secret Key
+   - Optional: set Redirect URI; otherwise the plugin callback URL is used
 
 4. **Connect a bank account**:
-   - Click "Connect Bank Account" in the Bank Sync settings
-   - You'll be redirected to GoCardless to authorize access
-   - After authorization, you'll be redirected back
+   - Organizer → Bank Sync → Set up connection
+   - Select country and bank, create a requisition, authorize at the bank
+   - After the bank redirect, the connection should show as **Active**
+
+Sign up for Bank Account Data at https://bankaccountdata.gocardless.com/
 
 ## Dependencies
 
-The plugin requires:
-- `gocardless-pro>=1.0.0` (will be installed automatically)
 - `requests` (usually already installed with pretix)
 
 ## Troubleshooting
 
 ### Plugin not appearing in the list
 
-- Make sure you've installed it: `pip list | grep pretix-bank-sync`
-- Restart your pretix web server and celery workers
-- Check that the entry point is correct in `pyproject.toml`
+- `pip list | grep pretix-bank-sync`
+- Confirm entry point: `pretix_bank_sync.apps:PluginApp` in `pyproject.toml`
+- Restart pretix web and Celery
 
-### Import errors
+### Callback fails after bank authorization
 
-- Make sure all dependencies are installed: `pip install -r requirements.txt` (if you have one)
-- Verify the plugin is in your Python path
+- The callback URL must be reachable without requiring a logged-in session
+- Default path: `/control/organizer/<slug>/bank-sync/callback`
 
 ### Migration errors
 
-- Run: `python src/manage.py migrate pretix_bank_sync`
-- If tables already exist, you might need to fake the migration: `python src/manage.py migrate pretix_bank_sync --fake`
+```bash
+python -m pretix migrate pretix_bank_sync
+```
 
-## Next Steps
+## Behaviour
 
-After installation and configuration:
-
-1. The plugin will automatically sync transactions up to 4 times per day
-2. Transactions will be automatically matched to orders based on:
-   - Currency (primary filter)
-   - Order codes or invoice numbers in transaction references
-3. Matched transactions will create and confirm payments automatically
-4. View all transactions in Organizer Settings → Bank Sync → Transactions
+1. Periodic sync runs up to 4 times per day per active connection
+2. Matching uses order codes / remittance text, sender name, and amount
+3. High-confidence EUR exact matches auto-confirm when `pretix_bank_sync_auto_confirm` is enabled (default)
+4. Other matches appear under Event → Bank Transactions for approve/reject

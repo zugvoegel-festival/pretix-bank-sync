@@ -56,6 +56,18 @@
                                     <p class="help-block">{% trans "Your GoCardless Secret Key from the User Secrets section" %}</p>
                                 </div>
                             </div>
+
+                            <div class="form-group">
+                                <label class="col-md-3 control-label">{% trans "Auto-confirm matches" %}</label>
+                                <div class="col-md-9">
+                                    <div class="checkbox">
+                                        <label>
+                                            <input type="checkbox" name="auto_confirm" {% if auto_confirm %}checked{% endif %}>
+                                            {% trans "Automatically confirm high-confidence EUR exact order-code matches" %}
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
                             
                         </fieldset>
                         <div class="form-group submit-group">
