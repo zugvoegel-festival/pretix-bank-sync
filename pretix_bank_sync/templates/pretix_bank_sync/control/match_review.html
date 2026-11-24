@@ -1,12 +1,11 @@
 {% extends "pretixcontrol/base.html" %}
 {% load i18n %}
-{% load static %}
 
 {% block title %}{% trans "Bank Transactions" %} · {{ event.name }}{% endblock %}
 
 {% block custom_header %}
     {{ block.super }}
-    <link rel="stylesheet" type="text/css" href="{% static "pretix_bank_sync/css/bank_sync_common.css" %}" />
+    {% include "pretix_bank_sync/control/styles.html" %}
 {% endblock %}
 
 {% block content %}

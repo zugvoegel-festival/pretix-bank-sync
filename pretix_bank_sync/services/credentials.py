@@ -2,7 +2,10 @@
 Secure handling of GoCardless API credentials.
 
 The Secret Key is encrypted at rest with Fernet, keyed from Django's SECRET_KEY.
-Legacy plaintext values are still readable and re-encrypted on the next save.
+If Fernet is unavailable, the value is stored as plaintext (same as pretix
+payment-provider secrets) rather than failing the request with HTTP 500.
+Legacy plaintext values remain readable and are re-encrypted on the next save
+when Fernet works.
 """
 from __future__ import annotations
 
@@ -40,15 +43,22 @@ def encrypt_secret(plaintext: str) -> str:
         return ""
     if plaintext.startswith(ENC_PREFIX):
         return plaintext
-    token = _fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
-    return ENC_PREFIX + token
+    try:
+        token = _fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
+        return ENC_PREFIX + token
+    except Exception:
+        # Never fail the HTTP request because of crypto — fall back to plaintext.
+        logger.exception(
+            "Fernet encrypt failed; storing GoCardless secret in plaintext"
+        )
+        return plaintext
 
 
 def decrypt_secret(stored: str) -> str:
     if not stored:
         return ""
     if not stored.startswith(ENC_PREFIX):
-        # Legacy plaintext from before hardening
+        # Legacy / fallback plaintext
         return stored
     try:
         return _fernet().decrypt(stored[len(ENC_PREFIX) :].encode("ascii")).decode("utf-8")
@@ -62,7 +72,7 @@ def get_gocardless_credentials(organizer) -> Tuple[str, str, str]:
     client_id = organizer.settings.get(CLIENT_ID_KEY, "") or ""
     client_secret = decrypt_secret(organizer.settings.get(CLIENT_SECRET_KEY, "") or "")
     redirect_uri = organizer.settings.get(REDIRECT_URI_KEY, "") or ""
-    return client_id, client_secret, redirect_uri
+    return str(client_id), str(client_secret), str(redirect_uri)
 
 
 def has_gocardless_credentials(organizer) -> bool:

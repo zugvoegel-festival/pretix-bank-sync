@@ -65,7 +65,9 @@ class GoCardlessService:
         }
 
         try:
-            response = requests.post(url, json=data, timeout=30)
+            # Keep below gunicorn's default 30s worker timeout so a hung API
+            # returns an error page instead of an opaque worker-kill 500.
+            response = requests.post(url, json=data, timeout=12)
             response.raise_for_status()
             token_data = response.json()
             access_token = token_data.get("access")
@@ -119,7 +121,7 @@ class GoCardlessService:
         json_body=None,
         auth: bool = True,
         scope: Optional[str] = None,
-        timeout: int = 30,
+        timeout: int = 12,
     ) -> requests.Response:
         """Perform an API request with auth and 429 handling."""
         headers = {}
