@@ -372,6 +372,19 @@ def _normalize_name(name):
     return " ".join(name.upper().split())
 
 
+def _as_decimal(value) -> Decimal:
+    """Coerce money-like values to Decimal (avoids Decimal/float TypeError)."""
+    if value is None:
+        return Decimal("0")
+    if isinstance(value, Decimal):
+        return value
+    return Decimal(str(value))
+
+
+def _currency_code(value) -> str:
+    return (value or "").strip().upper()
+
+
 def _calculate_name_similarity(name1, name2):
     """Calculate similarity between two names (simple word-based matching)."""
     if not name1 or not name2:
@@ -403,9 +416,11 @@ def _calculate_name_similarity(name1, name2):
 def _find_fuzzy_code_matches(reference_text, order_codes):
     """Find order codes that appear within the reference text (fuzzy matching)."""
     matches = []
-    reference_upper = reference_text.upper()
+    reference_upper = (reference_text or "").upper()
     
     for code in order_codes:
+        if not code:
+            continue
         code_upper = code.upper()
         # Check if code appears in reference (with or without separators)
         if code_upper in reference_upper:
@@ -426,10 +441,12 @@ EVENT_ORDER_PATTERN = re.compile(
 
 
 def _suggestion_for_order(trans, order, match_type, match_reason, base_confidence):
-    amount_match = abs(trans.amount - order.pending_sum) < Decimal("0.01")
-    amount_diff = trans.amount - order.pending_sum
-    currency_match = trans.currency.upper() == order.event.currency.upper()
-    is_eur = trans.currency.upper() == 'EUR'
+    amount = _as_decimal(trans.amount)
+    pending = _as_decimal(order.pending_sum)
+    amount_match = abs(amount - pending) < Decimal("0.01")
+    amount_diff = amount - pending
+    currency_match = _currency_code(trans.currency) == _currency_code(order.event.currency)
+    is_eur = _currency_code(trans.currency) == 'EUR'
 
     confidence = base_confidence
     if amount_match and currency_match and is_eur:
@@ -490,6 +507,8 @@ def _find_event_order_matches(trans, pending_orders):
 def _generate_match_suggestions(trans: BankTransaction, organizer):
     """Generate match suggestions using multi-step fuzzy logic."""
     suggestions = []
+    amount = _as_decimal(trans.amount)
+    tx_currency = _currency_code(trans.currency)
     
     # Get all pending orders for this organizer
     pending_orders = Order.objects.filter(
@@ -500,7 +519,7 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
     if not pending_orders.exists():
         return suggestions
     
-    reference_text = trans.get_reference_text()
+    reference_text = trans.get_reference_text() or ""
     reference_upper = reference_text.upper()
     sender_name = trans.get_sender_name()
     
@@ -526,16 +545,16 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
     # Check if multiple orders were found - this might be a multi-order payment
     if len(matched_orders) > 1:
         # Calculate total pending sum for all matched orders
-        total_pending = sum(o.pending_sum for o in matched_orders)
-        total_amount_match = abs(trans.amount - total_pending) < Decimal("0.01")
-        total_amount_diff = trans.amount - total_pending
+        total_pending = sum((_as_decimal(o.pending_sum) for o in matched_orders), Decimal("0"))
+        total_amount_match = abs(amount - _as_decimal(total_pending)) < Decimal("0.01")
+        total_amount_diff = amount - _as_decimal(total_pending)
         
         # Check currency match (all orders should have same currency)
         currency_match = all(
-            trans.currency.upper() == o.event.currency.upper() 
+            tx_currency == _currency_code(o.event.currency) 
             for o in matched_orders
         )
-        is_eur = trans.currency.upper() == 'EUR'
+        is_eur = tx_currency == 'EUR'
         
         if total_amount_match and currency_match:
             # Multiple orders found and total amount matches - likely multi-order payment
@@ -550,17 +569,17 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
                     'confidence_score': confidence,
                     'match_reason': match_reason,
                     'amount_match': True,  # Individual amount doesn't match, but total does
-                    'amount_difference': order.pending_sum - trans.amount,  # Difference from total
+                    'amount_difference': _as_decimal(order.pending_sum) - amount,  # Difference from total
                     'is_multi_order': True,  # Flag to indicate this is part of a multi-order payment
                     'related_orders': [o.code for o in matched_orders],  # List of all orders in this payment
                 })
         else:
             # Multiple orders found but amount doesn't match - create individual suggestions
             for order in matched_orders:
-                amount_match = abs(trans.amount - order.pending_sum) < Decimal("0.01")
-                amount_diff = trans.amount - order.pending_sum
-                currency_match = trans.currency.upper() == order.event.currency.upper()
-                is_eur = trans.currency.upper() == 'EUR'
+                amount_match = abs(amount - _as_decimal(order.pending_sum)) < Decimal("0.01")
+                amount_diff = amount - _as_decimal(order.pending_sum)
+                currency_match = tx_currency == _currency_code(order.event.currency)
+                is_eur = tx_currency == 'EUR'
                 
                 confidence = 1.0
                 if amount_match and currency_match and is_eur:
@@ -595,10 +614,10 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
     else:
         # Single order match (original logic)
         for order in matched_orders:
-            amount_match = abs(trans.amount - order.pending_sum) < Decimal("0.01")
-            amount_diff = trans.amount - order.pending_sum
-            currency_match = trans.currency.upper() == order.event.currency.upper()
-            is_eur = trans.currency.upper() == 'EUR'
+            amount_match = abs(amount - _as_decimal(order.pending_sum)) < Decimal("0.01")
+            amount_diff = amount - _as_decimal(order.pending_sum)
+            currency_match = tx_currency == _currency_code(order.event.currency)
+            is_eur = tx_currency == 'EUR'
             
             confidence = 1.0  # Highest confidence for exact code match
             if amount_match and currency_match and is_eur:
@@ -638,10 +657,10 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
         fuzzy_matches = _find_fuzzy_code_matches(reference_text, order_codes)
         for order in pending_orders:
             if order.code in fuzzy_matches:
-                amount_match = abs(trans.amount - order.pending_sum) < Decimal("0.01")
-                amount_diff = trans.amount - order.pending_sum
-                currency_match = trans.currency.upper() == order.event.currency.upper()
-                is_eur = trans.currency.upper() == 'EUR'
+                amount_match = abs(amount - _as_decimal(order.pending_sum)) < Decimal("0.01")
+                amount_diff = amount - _as_decimal(order.pending_sum)
+                currency_match = tx_currency == _currency_code(order.event.currency)
+                is_eur = tx_currency == 'EUR'
                 
                 confidence = 0.7  # Lower confidence for fuzzy match
                 if amount_match and currency_match and is_eur:
@@ -684,10 +703,10 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
             if customer_name:
                 name_similarity = _calculate_name_similarity(sender_name, customer_name)
                 if name_similarity > 0.5:  # Threshold for name matching
-                    amount_match = abs(trans.amount - order.pending_sum) < Decimal("0.01")
-                    amount_diff = trans.amount - order.pending_sum
-                    currency_match = trans.currency.upper() == order.event.currency.upper()
-                    is_eur = trans.currency.upper() == 'EUR'
+                    amount_match = abs(amount - _as_decimal(order.pending_sum)) < Decimal("0.01")
+                    amount_diff = amount - _as_decimal(order.pending_sum)
+                    currency_match = tx_currency == _currency_code(order.event.currency)
+                    is_eur = tx_currency == 'EUR'
                     
                     confidence = name_similarity * 0.6  # Max 0.6 for name-only matches
                     if amount_match and currency_match and is_eur:
@@ -718,13 +737,14 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
     # Only create suggestions if no other matches were found
     if not suggestions:
         for order in pending_orders:
-            currency_match = trans.currency.upper() == order.event.currency.upper()
-            amount_match = abs(trans.amount - order.pending_sum) < Decimal("0.01")
-            amount_diff = abs(trans.amount - order.pending_sum)
-            is_eur = trans.currency.upper() == 'EUR'
+            currency_match = tx_currency == _currency_code(order.event.currency)
+            amount_match = abs(amount - _as_decimal(order.pending_sum)) < Decimal("0.01")
+            amount_diff = abs(amount - _as_decimal(order.pending_sum))
+            is_eur = tx_currency == 'EUR'
             
             # Only suggest if currency matches and amount is close (within 10% or €10)
-            if currency_match and amount_diff <= max(order.pending_sum * Decimal("0.1"), Decimal("10.00")):
+            threshold = max(abs(_as_decimal(order.pending_sum)) * Decimal("0.1"), Decimal("10.00"))
+            if currency_match and amount_diff <= threshold:
                 # Very low confidence for amount-only matches
                 if amount_match and is_eur:
                     confidence = 0.4
@@ -758,10 +778,9 @@ def _generate_match_suggestions(trans: BankTransaction, organizer):
 
 def match_transactions(connection: BankConnection):
     """Match unchecked transactions to orders using fuzzy logic."""
-    # Get all unchecked transactions for this connection
     transactions = BankTransaction.objects.filter(
         connection=connection,
-        state=BankTransaction.STATE_UNCHECKED
+        state=BankTransaction.STATE_UNCHECKED,
     )
 
     if not transactions.exists():
@@ -769,53 +788,74 @@ def match_transactions(connection: BankConnection):
 
     organizer = connection.organizer
     auto_confirm = organizer.settings.get('pretix_bank_sync_auto_confirm', True)
+    matched = 0
+    nomatch = 0
+    review = 0
+    errors = 0
 
-    for trans in transactions:
-        if trans.amount == Decimal("0.00"):
-            # Ignore zero-valued transactions
-            trans.state = BankTransaction.STATE_DISCARDED
-            trans.save()
-            continue
+    for trans in transactions.iterator(chunk_size=100):
+        try:
+            amount = _as_decimal(trans.amount)
+            tx_currency = _currency_code(trans.currency)
 
-        # Generate match suggestions
-        suggestions = _generate_match_suggestions(trans, organizer)
-        
-        if not suggestions:
-            # No matches found
-            trans.state = BankTransaction.STATE_NOMATCH
-            trans.save()
-            continue
-        
-        # Check if we have a high-confidence exact match with amount match
-        # Only auto-approve if: exact code match, high confidence, amount matches, AND currency is EUR
-        best_suggestion = suggestions[0]
-        is_eur = trans.currency.upper() == 'EUR'
-        currency_match = trans.currency.upper() == best_suggestion['order'].event.currency.upper()
-        is_multi_order = "Multiple order codes found" in best_suggestion.get('match_reason', '')
-        
-        # Check for multi-order payment auto-approval
-        if is_multi_order and auto_confirm:
-            # Find all suggestions that mention multiple orders
-            multi_order_suggestions = [s for s in suggestions if "Multiple order codes found" in s.get('match_reason', '')]
-            
-            if len(multi_order_suggestions) > 1:
-                # All orders found in suggestions
-                orders = [s['order'] for s in multi_order_suggestions]
-                total_pending = sum(o.pending_sum for o in orders)
-                if (abs(trans.amount - total_pending) < Decimal("0.01") and
-                    is_eur and
-                    all(trans.currency.upper() == o.event.currency.upper() for o in orders) and
-                    best_suggestion['confidence_score'] >= 0.95):
-                    # Auto-approve multi-order payment
-                    trans.order = orders[0]
-                    trans.state = BankTransaction.STATE_MATCHED
-                    
-                    matches = [(o.event.slug, o.code) for o in orders]
-                    _handle_transaction(trans, matches, {}, organizer, amount=trans.amount)
+            if amount == Decimal("0.00"):
+                trans.state = BankTransaction.STATE_DISCARDED
+                trans.save(update_fields=['state'])
+                continue
+
+            suggestions = _generate_match_suggestions(trans, organizer)
+
+            if not suggestions:
+                trans.state = BankTransaction.STATE_NOMATCH
+                trans.save(update_fields=['state'])
+                nomatch += 1
+                continue
+
+            best_suggestion = suggestions[0]
+            is_eur = tx_currency == 'EUR'
+            currency_match = tx_currency == _currency_code(best_suggestion['order'].event.currency)
+            is_multi_order = "Multiple order codes found" in best_suggestion.get('match_reason', '')
+
+            if is_multi_order and auto_confirm:
+                multi_order_suggestions = [
+                    s for s in suggestions
+                    if "Multiple order codes found" in s.get('match_reason', '')
+                ]
+
+                if len(multi_order_suggestions) > 1:
+                    orders = [s['order'] for s in multi_order_suggestions]
+                    total_pending = sum((_as_decimal(o.pending_sum) for o in orders), Decimal("0"))
+                    if (
+                        abs(amount - total_pending) < Decimal("0.01")
+                        and is_eur
+                        and all(tx_currency == _currency_code(o.event.currency) for o in orders)
+                        and best_suggestion['confidence_score'] >= 0.95
+                    ):
+                        trans.order = orders[0]
+                        trans.state = BankTransaction.STATE_MATCHED
+                        matches = [(o.event.slug, o.code) for o in orders]
+                        _handle_transaction(trans, matches, {}, organizer, amount=amount)
+                        matched += 1
+                    else:
+                        trans.state = BankTransaction.STATE_PENDING_APPROVAL
+                        trans.save(update_fields=['state'])
+                        TransactionMatchSuggestion.objects.filter(transaction=trans).delete()
+                        for sug in suggestions[:10]:
+                            TransactionMatchSuggestion.objects.create(
+                                transaction=trans,
+                                order=sug['order'],
+                                match_type=sug['match_type'],
+                                confidence_score=sug['confidence_score'],
+                                match_reason=sug['match_reason'],
+                                amount_match=sug['amount_match'],
+                                amount_difference=_as_decimal(
+                                    sug.get('amount_difference', Decimal('0'))
+                                ),
+                            )
+                        review += 1
                 else:
-                    # Multi-order but doesn't meet auto-approval criteria - needs review
                     trans.state = BankTransaction.STATE_PENDING_APPROVAL
-                    trans.save()
+                    trans.save(update_fields=['state'])
                     TransactionMatchSuggestion.objects.filter(transaction=trans).delete()
                     for sug in suggestions[:10]:
                         TransactionMatchSuggestion.objects.create(
@@ -825,14 +865,43 @@ def match_transactions(connection: BankConnection):
                             confidence_score=sug['confidence_score'],
                             match_reason=sug['match_reason'],
                             amount_match=sug['amount_match'],
-                            amount_difference=sug.get('amount_difference', Decimal('0')),
+                            amount_difference=_as_decimal(
+                                sug.get('amount_difference', Decimal('0'))
+                            ),
                         )
+                    review += 1
+            elif (
+                auto_confirm
+                and best_suggestion['match_type'] in (
+                    TransactionMatchSuggestion.MATCH_TYPE_EXACT_CODE,
+                    TransactionMatchSuggestion.MATCH_TYPE_EVENT_ORDER,
+                )
+                and best_suggestion['confidence_score'] >= 0.95
+                and best_suggestion['amount_match']
+                and is_eur
+                and currency_match
+            ):
+                order = best_suggestion['order']
+                trans.order = order
+                trans.state = BankTransaction.STATE_MATCHED
+
+                if amount < _as_decimal(order.pending_sum):
+                    trans.is_partial_payment = True
+                    trans.payment_group_id = f"{order.code}_{trans.date.isoformat()}"
+
+                _handle_transaction(
+                    trans,
+                    [(order.event.slug, order.code)],
+                    {},
+                    organizer,
+                    amount=amount,
+                )
+                matched += 1
             else:
-                # Multi-order mentioned but not all found - needs review
                 trans.state = BankTransaction.STATE_PENDING_APPROVAL
-                trans.save()
+                trans.save(update_fields=['state'])
                 TransactionMatchSuggestion.objects.filter(transaction=trans).delete()
-                for sug in suggestions[:10]:
+                for sug in suggestions[:5]:
                     TransactionMatchSuggestion.objects.create(
                         transaction=trans,
                         order=sug['order'],
@@ -840,48 +909,32 @@ def match_transactions(connection: BankConnection):
                         confidence_score=sug['confidence_score'],
                         match_reason=sug['match_reason'],
                         amount_match=sug['amount_match'],
-                        amount_difference=sug.get('amount_difference', Decimal('0')),
+                        amount_difference=_as_decimal(sug['amount_difference']),
                     )
-        elif (auto_confirm and
-              best_suggestion['match_type'] in (
-                  TransactionMatchSuggestion.MATCH_TYPE_EXACT_CODE,
-                  TransactionMatchSuggestion.MATCH_TYPE_EVENT_ORDER,
-              ) and
-              best_suggestion['confidence_score'] >= 0.95 and
-              best_suggestion['amount_match'] and
-              is_eur and
-              currency_match):
-            # Auto-approve high-confidence event+order / exact code matches (EUR)
-            order = best_suggestion['order']
-            trans.order = order
-            trans.state = BankTransaction.STATE_MATCHED
-            
-            # Check if this is a partial payment
-            if trans.amount < order.pending_sum:
-                trans.is_partial_payment = True
-                trans.payment_group_id = f"{order.code}_{trans.date.isoformat()}"
-            
-            # Process the transaction directly
-            _handle_transaction(trans, [(order.event.slug, order.code)], {}, organizer, amount=trans.amount)
-        else:
-            # Create suggestions for human review
-            trans.state = BankTransaction.STATE_PENDING_APPROVAL
-            trans.save()
-            
-            # Delete old suggestions for this transaction
-            TransactionMatchSuggestion.objects.filter(transaction=trans).delete()
-            
-            # Create new suggestions (limit to top 5)
-            for sug in suggestions[:5]:
-                TransactionMatchSuggestion.objects.create(
-                    transaction=trans,
-                    order=sug['order'],
-                    match_type=sug['match_type'],
-                    confidence_score=sug['confidence_score'],
-                    match_reason=sug['match_reason'],
-                    amount_match=sug['amount_match'],
-                    amount_difference=sug['amount_difference'],
-                )
+                review += 1
+        except Exception:
+            errors += 1
+            logger.exception(
+                "Error matching transaction %s (connection %s)",
+                getattr(trans, 'pk', '?'),
+                connection.pk,
+            )
+            try:
+                if trans.state == BankTransaction.STATE_UNCHECKED:
+                    trans.state = BankTransaction.STATE_ERROR
+                    trans.save(update_fields=['state'])
+            except Exception:
+                logger.exception("Failed to mark transaction as error after match failure")
+
+    logger.info(
+        "Match connection %s: matched=%s review=%s nomatch=%s errors=%s",
+        connection.pk,
+        matched,
+        review,
+        nomatch,
+        errors,
+    )
+
 
 
 @app.task(base=TransactionAwareTask, bind=True, max_retries=3, default_retry_delay=60)
@@ -1062,10 +1115,16 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
                 total_errors,
             )
 
-            # Match new transactions
+            # Match new transactions (never fail the sync HTTP path on match errors)
             if new_transactions:
                 logger.info(f"Synced {len(new_transactions)} new transactions for connection {connection_id}")
-                match_transactions(connection)
+                try:
+                    match_transactions(connection)
+                except Exception:
+                    logger.exception(
+                        "Matching failed after sync for connection %s; transactions are saved",
+                        connection_id,
+                    )
 
             # Check if consent has expired
             if connection.consent_expires_at and connection.consent_expires_at < now():
