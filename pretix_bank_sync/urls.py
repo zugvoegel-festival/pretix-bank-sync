@@ -46,8 +46,10 @@ urlpatterns = [
         BankSyncSettingsView.as_view(),
         name='settings'
     ),
+    # Outside /control/: GoCardless redirects here without a pretix control session.
+    # PermissionMiddleware would otherwise 404 with "no permission to administrate".
     re_path(
-        r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/callback$',
+        r'^_bank_sync/organizer/(?P<organizer>[^/]+)/callback$',
         BankSyncCallbackView.as_view(),
         name='callback'
     ),

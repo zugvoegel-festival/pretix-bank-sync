@@ -34,6 +34,7 @@ Configuration
    https://bankaccountdata.gocardless.com/
 2. Copy your Secret ID and Secret Key into the plugin settings / setup wizard
 3. Register the plugin callback URL as a redirect URI if required
+   (``/_bank_sync/organizer/<slug>/callback``)
 4. Complete the bank authorization wizard
 
 One bank connection per organizer (multiple accounts under that consent are OK).

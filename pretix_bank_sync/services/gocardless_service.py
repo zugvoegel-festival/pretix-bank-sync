@@ -194,6 +194,9 @@ class GoCardlessService:
 
         Returns:
             Dict with 'id' (requisition_id) and 'link' (authorization URL)
+
+        Note: omit ``reference`` so GoCardless uses the requisition id as ``?ref=``,
+        which matches how the callback looks up ``BankConnection.requisition_id``.
         """
         data = {
             "redirect": redirect_url,
