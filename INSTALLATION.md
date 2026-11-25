@@ -67,11 +67,11 @@ Sign up for Bank Account Data at https://bankaccountdata.gocardless.com/
 
 ### Callback fails after bank authorization
 
-- The callback URL must be reachable without requiring a logged-in control session
-- Default path: `/_bank_sync/organizer/<slug>/callback` (outside `/control/` so
-  pretix PermissionMiddleware does not require organizer-admin access)
-- After changing the callback path, create a **new** requisition (setup wizard →
-  Create requisition again); GoCardless stores the redirect URL on the requisition
+- Preferred callback path: `/_bank_sync/organizer/<slug>/callback`
+- Legacy path `/control/organizer/<slug>/bank-sync/callback` still works (exempt
+  from control permission checks) for requisitions created before the move
+- If bank consent already succeeded but the browser landed on a 404, open:
+  `/_bank_sync/organizer/<slug>/callback?ref=<same-ref-from-the-404-url>`
 
 ### Migration errors
 
