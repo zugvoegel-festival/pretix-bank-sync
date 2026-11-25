@@ -22,8 +22,11 @@
 
     <div class="alert alert-info">
         {% blocktrans trimmed %}
-            The GoCardless Secret Key is encrypted at rest and never shown again after saving.
-            Leave the Secret Key field blank to keep the current key.
+            Create or copy your Secret ID and Secret Key from the GoCardless Bank Account Data portal
+            (<a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">https://bankaccountdata.gocardless.com/</a>),
+            under <strong>User Secrets</strong>.
+            The Secret Key is encrypted at rest and never shown again after saving;
+            leave the Secret Key field blank to keep the current key.
         {% endblocktrans %}
     </div>
 
@@ -46,7 +49,13 @@
                                            value="{{ gocardless_client_id }}" 
                                            autocomplete="off"
                                            placeholder="{% trans 'Enter your GoCardless Secret ID' %}">
-                                    <p class="help-block">{% trans "Your GoCardless Secret ID from the User Secrets section in the Bank Account Data portal" %}</p>
+                                    <p class="help-block">
+                                        {% blocktrans trimmed %}
+                                            From
+                                            <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
+                                            → User Secrets
+                                        {% endblocktrans %}
+                                    </p>
                                 </div>
                             </div>
                             
@@ -61,7 +70,11 @@
                                         {% if secret_configured %}
                                             {% trans "A Secret Key is already stored (encrypted). Enter a new value only to replace it." %}
                                         {% else %}
-                                            {% trans "Your GoCardless Secret Key from the User Secrets section" %}
+                                            {% blocktrans trimmed %}
+                                                From
+                                                <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
+                                                → User Secrets
+                                            {% endblocktrans %}
                                         {% endif %}
                                     </p>
                                 </div>
