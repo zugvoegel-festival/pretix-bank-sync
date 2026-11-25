@@ -38,6 +38,14 @@
                     <div class="alert alert-danger">{{ credentials_error }}</div>
                 {% endif %}
 
+                <div class="alert alert-info">
+                    {% blocktrans trimmed %}
+                        Create or copy your Secret ID and Secret Key from the GoCardless Bank Account Data portal
+                        (<a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">https://bankaccountdata.gocardless.com/</a>),
+                        under <strong>User Secrets</strong>.
+                    {% endblocktrans %}
+                </div>
+
                 <form method="post" action="" class="form-horizontal" autocomplete="off">
                     {% csrf_token %}
                     <input type="hidden" name="step" value="credentials">
@@ -45,6 +53,13 @@
                         <label class="col-md-3 control-label">{% trans "Secret ID" %}</label>
                         <div class="col-md-9">
                             <input type="text" name="client_id" class="form-control" value="{{ client_id }}" required autocomplete="off">
+                            <p class="help-block">
+                                {% blocktrans trimmed %}
+                                    From
+                                    <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
+                                    → User Secrets
+                                {% endblocktrans %}
+                            </p>
                         </div>
                     </div>
                     <div class="form-group">
@@ -56,6 +71,14 @@
                                    placeholder="{% if secret_configured %}{% trans 'Leave blank to keep current encrypted key' %}{% endif %}">
                             {% if secret_configured %}
                                 <p class="help-block">{% trans "A Secret Key is already stored encrypted. Leave blank to keep it." %}</p>
+                            {% else %}
+                                <p class="help-block">
+                                    {% blocktrans trimmed %}
+                                        From
+                                        <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
+                                        → User Secrets
+                                    {% endblocktrans %}
+                                </p>
                             {% endif %}
                         </div>
                     </div>
