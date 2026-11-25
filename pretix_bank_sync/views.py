@@ -844,6 +844,51 @@ class BankSelectionForm(forms.Form):
             self.fields['bank_name'].choices = choices
 
 
+def _redirect_after_bank_callback(request, organizer, *, prefer_wizard_authorize: bool = False):
+    """
+    Send the user somewhere they can open after the unauthenticated GoCardless
+    return. Staff often lose Admin mode during the bank redirect and would get
+    a permission 404 on the organizer Bank Sync pages.
+    """
+    list_url = reverse(
+        'plugins:pretix_bank_sync:connections_list',
+        kwargs={'organizer': organizer.slug},
+    )
+    wizard_url = (
+        f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}"
+        f"?step=authorize"
+    )
+    target = wizard_url if prefer_wizard_authorize else list_url
+
+    user = getattr(request, 'user', None)
+    if (
+        user is not None
+        and user.is_authenticated
+        and user.has_organizer_permission(organizer, request=request)
+    ):
+        return redirect(target)
+
+    # Connection was still activated/updated above; do not bounce into a 404.
+    if user is not None and user.is_authenticated:
+        messages.info(
+            request,
+            _(
+                'Open Bank Sync for organizer “%(organizer)s” (enable Admin mode if you are staff).'
+            ) % {'organizer': organizer.slug},
+        )
+        return redirect(reverse('control:index'))
+
+    from django.conf import settings
+    from django.contrib.auth.views import redirect_to_login
+    from django.shortcuts import resolve_url
+
+    return redirect_to_login(
+        target,
+        resolve_url(settings.LOGIN_URL_CONTROL),
+        'next',
+    )
+
+
 class BankSyncCallbackView(View):
     """
     Handle OAuth callback from GoCardless.
@@ -858,16 +903,12 @@ class BankSyncCallbackView(View):
         with scope(organizer=None):
             organizer = get_object_or_404(Organizer, slug=kwargs['organizer'])
 
-        list_url = reverse(
-            'plugins:pretix_bank_sync:connections_list',
-            kwargs={'organizer': organizer.slug},
-        )
         # GoCardless returns ?ref= (requisition id when reference was omitted on create)
         ref = request.GET.get('ref')
 
         if not ref:
             messages.error(request, _('Invalid callback. Missing requisition reference.'))
-            return redirect(list_url)
+            return _redirect_after_bank_callback(request, organizer)
 
         try:
             with scope(organizer=organizer):
@@ -878,7 +919,7 @@ class BankSyncCallbackView(View):
 
                 if not connection:
                     messages.error(request, _('No pending connection found.'))
-                    return redirect(list_url)
+                    return _redirect_after_bank_callback(request, organizer)
 
                 client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
 
@@ -914,21 +955,21 @@ class BankSyncCallbackView(View):
                     messages.success(request, _('Bank account connected successfully!'))
                     request.session.pop('gocardless_auth_link', None)
                     request.session.pop('gocardless_selected_institution', None)
-                    return redirect(list_url)
+                    return _redirect_after_bank_callback(request, organizer)
 
                 connection.status = BankConnection.STATUS_ERROR
                 connection.last_error = f"Requisition status: {status}"
                 connection.last_error_at = now()
                 connection.save(update_fields=['status', 'last_error', 'last_error_at'])
                 messages.error(request, _('Authorization failed. Status: {}').format(status))
-                return redirect(
-                    f"{reverse('plugins:pretix_bank_sync:bank_setup_wizard', kwargs={'organizer': organizer.slug})}?step=authorize"
+                return _redirect_after_bank_callback(
+                    request, organizer, prefer_wizard_authorize=True
                 )
 
         except Exception as e:
             logger.exception("Error processing GoCardless callback")
             messages.error(request, _('An error occurred: {}').format(str(e)))
-            return redirect(list_url)
+            return _redirect_after_bank_callback(request, organizer)
 
 
 class BankSyncFetchTransactionsView(OrganizerPermissionRequiredMixin, View):
