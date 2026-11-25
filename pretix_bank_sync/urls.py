@@ -46,10 +46,18 @@ urlpatterns = [
         BankSyncSettingsView.as_view(),
         name='settings'
     ),
+    # Preferred callback: outside /control/ so PermissionMiddleware is not involved.
+    re_path(
+        r'^_bank_sync/organizer/(?P<organizer>[^/]+)/callback$',
+        BankSyncCallbackView.as_view(),
+        name='callback'
+    ),
+    # Legacy path kept for requisitions created before the URL move. Exempted from
+    # PermissionMiddleware in apps.PluginApp.ready().
     re_path(
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/callback$',
         BankSyncCallbackView.as_view(),
-        name='callback'
+        name='callback_legacy'
     ),
     re_path(
         r'^control/organizer/(?P<organizer>[^/]+)/bank-sync/transactions$',
