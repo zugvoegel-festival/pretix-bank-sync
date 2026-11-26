@@ -1,11 +1,10 @@
 """
-Secure handling of GoCardless API credentials.
+Secure handling of Enable Banking API credentials.
 
-The Secret Key is encrypted at rest with Fernet, keyed from Django's SECRET_KEY.
-If Fernet is unavailable, the value is stored as plaintext (same as pretix
-payment-provider secrets) rather than failing the request with HTTP 500.
-Legacy plaintext values remain readable and are re-encrypted on the next save
-when Fernet works.
+The RSA private key is encrypted at rest with Fernet, keyed from Django's
+SECRET_KEY. If Fernet is unavailable, the value is stored as plaintext rather
+than failing the request with HTTP 500. Legacy plaintext values remain readable
+and are re-encrypted on the next save when Fernet works.
 """
 from __future__ import annotations
 
@@ -19,9 +18,15 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 ENC_PREFIX = "enc:v1:"
-CLIENT_ID_KEY = "pretix_bank_sync_gocardless_client_id"
-CLIENT_SECRET_KEY = "pretix_bank_sync_gocardless_client_secret"
-REDIRECT_URI_KEY = "pretix_bank_sync_gocardless_redirect_uri"
+APP_ID_KEY = "pretix_bank_sync_enablebanking_app_id"
+PRIVATE_KEY_KEY = "pretix_bank_sync_enablebanking_private_key"
+COUNTRY_KEY = "pretix_bank_sync_enablebanking_country"
+FETCH_INTERVAL_KEY = "pretix_bank_sync_enablebanking_fetch_interval"
+
+# Legacy GoCardless keys (read-only for migration notice; no longer written)
+LEGACY_CLIENT_ID_KEY = "pretix_bank_sync_gocardless_client_id"
+LEGACY_CLIENT_SECRET_KEY = "pretix_bank_sync_gocardless_client_secret"
+LEGACY_REDIRECT_URI_KEY = "pretix_bank_sync_gocardless_redirect_uri"
 
 
 def _secret_key_material() -> bytes:
@@ -47,9 +52,8 @@ def encrypt_secret(plaintext: str) -> str:
         token = _fernet().encrypt(plaintext.encode("utf-8")).decode("ascii")
         return ENC_PREFIX + token
     except Exception:
-        # Never fail the HTTP request because of crypto — fall back to plaintext.
         logger.exception(
-            "Fernet encrypt failed; storing GoCardless secret in plaintext"
+            "Fernet encrypt failed; storing Enable Banking private key in plaintext"
         )
         return plaintext
 
@@ -58,46 +62,53 @@ def decrypt_secret(stored: str) -> str:
     if not stored:
         return ""
     if not stored.startswith(ENC_PREFIX):
-        # Legacy / fallback plaintext
         return stored
     try:
-        return _fernet().decrypt(stored[len(ENC_PREFIX) :].encode("ascii")).decode("utf-8")
+        return _fernet().decrypt(stored[len(ENC_PREFIX):].encode("ascii")).decode("utf-8")
     except Exception:
-        logger.exception("Failed to decrypt GoCardless secret")
+        logger.exception("Failed to decrypt Enable Banking private key")
         return ""
 
 
-def get_gocardless_credentials(organizer) -> Tuple[str, str, str]:
-    """Return (client_id, client_secret_plaintext, redirect_uri)."""
-    client_id = organizer.settings.get(CLIENT_ID_KEY, "") or ""
-    client_secret = decrypt_secret(organizer.settings.get(CLIENT_SECRET_KEY, "") or "")
-    redirect_uri = organizer.settings.get(REDIRECT_URI_KEY, "") or ""
-    return str(client_id), str(client_secret), str(redirect_uri)
+def get_enablebanking_credentials(organizer) -> Tuple[str, str]:
+    """Return (app_id, private_key_plaintext)."""
+    app_id = organizer.settings.get(APP_ID_KEY, "") or ""
+    private_key = decrypt_secret(organizer.settings.get(PRIVATE_KEY_KEY, "") or "")
+    return str(app_id), str(private_key)
 
 
-def has_gocardless_credentials(organizer) -> bool:
-    client_id, client_secret, _redirect = get_gocardless_credentials(organizer)
-    return bool(client_id and client_secret)
+def has_enablebanking_credentials(organizer) -> bool:
+    app_id, private_key = get_enablebanking_credentials(organizer)
+    return bool(app_id and private_key)
 
 
-def set_gocardless_credentials(
+def set_enablebanking_credentials(
     organizer,
-    client_id: str,
-    client_secret: Optional[str] = None,
-    redirect_uri: Optional[str] = None,
+    app_id: str,
+    private_key: Optional[str] = None,
+    country: Optional[str] = None,
 ):
     """
-    Persist credentials. Pass client_secret=None to leave the existing secret unchanged.
-    Empty string for client_secret clears it.
+    Persist credentials. Pass private_key=None to leave the existing key unchanged.
+    Empty string for private_key clears it.
     """
-    organizer.settings.set(CLIENT_ID_KEY, (client_id or "").strip())
-    if client_secret is not None:
-        secret = client_secret.strip()
-        organizer.settings.set(CLIENT_SECRET_KEY, encrypt_secret(secret) if secret else "")
-    if redirect_uri is not None:
-        organizer.settings.set(REDIRECT_URI_KEY, (redirect_uri or "").strip())
+    organizer.settings.set(APP_ID_KEY, (app_id or "").strip())
+    if private_key is not None:
+        key = private_key.strip()
+        organizer.settings.set(PRIVATE_KEY_KEY, encrypt_secret(key) if key else "")
+    if country is not None:
+        organizer.settings.set(COUNTRY_KEY, (country or "DE").strip() or "DE")
 
 
-def secret_is_configured(organizer) -> bool:
-    stored = organizer.settings.get(CLIENT_SECRET_KEY, "") or ""
+def private_key_is_configured(organizer) -> bool:
+    stored = organizer.settings.get(PRIVATE_KEY_KEY, "") or ""
     return bool(decrypt_secret(stored))
+
+
+def get_default_country(organizer) -> str:
+    return organizer.settings.get(COUNTRY_KEY, "DE") or "DE"
+
+
+def clear_enablebanking_settings(organizer):
+    for key in (APP_ID_KEY, PRIVATE_KEY_KEY, COUNTRY_KEY, FETCH_INTERVAL_KEY):
+        organizer.settings.delete(key)

@@ -73,8 +73,9 @@
             {% trans "All transactions" %}
         </a>
         {% if stats.active %}
-            <form method="post" action="{% url 'plugins:pretix_bank_sync:fetch_transactions' organizer=organizer.slug %}" style="display:inline;">
+            <form method="post" action="{% url 'plugins:pretix_bank_sync:fetch_transactions' organizer=organizer.slug %}" style="display:inline;" class="form-inline">
                 {% csrf_token %}
+                <input type="date" name="date_from" class="form-control input-sm" title="{% trans 'Optional start date' %}">
                 <button type="submit" class="btn btn-default" {% if not can_manual_sync %}disabled title="{{ sync_block_reason }}"{% endif %}>
                     <span class="fa fa-refresh"></span>
                     {% trans "Fetch transactions now" %}
@@ -93,11 +94,18 @@
         </div>
     {% endif %}
 
+    {% if sandbox_mode %}
+        <div class="alert alert-warning">
+            <strong>{% trans "Sandbox mode" %}</strong> —
+            {% trans "The connected bank looks like a mock/sandbox ASPSP." %}
+        </div>
+    {% endif %}
+
     {% if not has_credentials %}
         <div class="alert alert-warning">
             {% blocktrans trimmed %}
-                GoCardless credentials are not configured yet.
-                Use the setup wizard or settings page to add your Secret ID and Secret Key.
+                Enable Banking credentials are not configured yet.
+                Use the setup wizard or settings page to add your Application ID and private key.
             {% endblocktrans %}
         </div>
     {% endif %}
@@ -147,15 +155,36 @@
                 <h3 class="panel-title">{% trans "Linked accounts" %}</h3>
             </div>
             <div class="panel-body">
-                <ul class="list-unstyled">
-                    {% for account in linked_accounts %}
-                        <li>
-                            <code>{{ account.iban_masked|default:account.id }}</code>
-                            {% if account.name %} — {{ account.name }}{% endif %}
-                            {% if account.currency %} ({{ account.currency }}){% endif %}
-                        </li>
-                    {% endfor %}
-                </ul>
+                <form method="post" action="">
+                    {% csrf_token %}
+                    <input type="hidden" name="action" value="update_accounts">
+                    <table class="table table-condensed">
+                        <thead>
+                            <tr>
+                                <th>{% trans "Sync" %}</th>
+                                <th>{% trans "Account" %}</th>
+                                <th>{% trans "IBAN" %}</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for account in linked_accounts %}
+                                <tr>
+                                    <td>
+                                        {% if account.pk %}
+                                            <input type="checkbox" name="active_accounts" value="{{ account.pk }}"
+                                                   {% if account.is_active %}checked{% endif %}>
+                                        {% else %}
+                                            <span class="fa fa-check text-muted"></span>
+                                        {% endif %}
+                                    </td>
+                                    <td>{{ account.name|default:account.id }}</td>
+                                    <td><code>{{ account.iban_masked|default:account.id }}</code></td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                    <button type="submit" class="btn btn-primary btn-sm">{% trans "Save account selection" %}</button>
+                </form>
             </div>
         </div>
     {% endif %}
@@ -171,7 +200,7 @@
                         <thead>
                             <tr>
                                 <th>{% trans "Status" %}</th>
-                                <th>{% trans "Requisition" %}</th>
+                                <th>{% trans "Bank" %}</th>
                                 <th>{% trans "Last sync" %}</th>
                                 <th>{% trans "Syncs today" %}</th>
                                 <th>{% trans "Consent expires" %}</th>
@@ -190,7 +219,14 @@
                                             <span class="label label-warning">{% trans "Expiring soon" %}</span>
                                         {% endif %}
                                     </td>
-                                    <td><code>{{ connection.requisition_id|truncatechars:24 }}</code></td>
+                                    <td>
+                                        {% if connection.aspsp_name %}
+                                            {{ connection.aspsp_name }}
+                                            {% if connection.aspsp_country %}<small class="text-muted">({{ connection.aspsp_country }})</small>{% endif %}
+                                        {% else %}
+                                            <code>{{ connection.session_id|truncatechars:24|default:"—" }}</code>
+                                        {% endif %}
+                                    </td>
                                     <td>
                                         {% if connection.last_sync %}
                                             {{ connection.last_sync|date:"SHORT_DATETIME_FORMAT" }}

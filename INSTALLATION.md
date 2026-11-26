@@ -15,11 +15,6 @@ If you're developing or testing the plugin locally:
    pip install -e .
    ```
 
-   This will:
-   - Install the plugin and its dependency (`requests`)
-   - Make the plugin discoverable by pretix
-   - Allow you to edit the code without reinstalling
-
 ## Production Installation
 
 ```bash
@@ -41,21 +36,34 @@ pip install .
 
 3. **Configure credentials**:
    - Organizer → Bank Sync → Settings (or the setup wizard)
-   - Enter GoCardless Bank Account Data Secret ID and Secret Key
-   - The Secret Key is encrypted at rest (Fernet via pretix `SECRET_KEY`) and never shown again; leave blank to keep the current key
-   - Optional: set Redirect URI; otherwise the plugin callback URL is used
-   - Rotating pretix `SECRET_KEY` will invalidate stored GoCardless secrets — re-enter them after a key rotation
+   - Enter Enable Banking Application ID and RSA private key (PEM)
+   - The private key is encrypted at rest (Fernet via pretix `SECRET_KEY`) and never shown again; leave blank to keep the current key
+   - Register the plugin callback URL as redirect URI in the Enable Banking control panel
+   - Rotating pretix `SECRET_KEY` will invalidate stored private keys — re-enter them after a key rotation
 
 4. **Connect a bank account**:
-   - Organizer → Bank Sync → Set up connection
-   - Select country and bank, create a requisition, authorize at the bank
-   - After the bank redirect, the connection should show as **Active**
+   - Organizer → Bank Sync → Connect bank account
+   - Select country and bank, authorize at the bank
+   - After the bank redirect, select which accounts to sync
+   - The connection should show as **Active**
 
-Sign up for Bank Account Data at https://bankaccountdata.gocardless.com/
+Sign up at https://enablebanking.com/cp/applications/
+
+### Sandbox testing
+
+Enable Banking provides a mock bank. When connecting **Aachener Bank** (country: **DE**), use:
+
+| Field | Value |
+|---|---|
+| VR NetKey | `VRK1234567890ALL` |
+| PIN | `password` |
+| OTP | `123456` |
 
 ## Dependencies
 
-- `requests` (usually already installed with pretix)
+- `requests`
+- `cryptography` (Fernet for private-key encryption)
+- `PyJWT` (RS256 JWT for Enable Banking API auth; usually already present via pretix)
 
 ## Troubleshooting
 
@@ -69,6 +77,7 @@ Sign up for Bank Account Data at https://bankaccountdata.gocardless.com/
 
 - The callback URL must be reachable without requiring a logged-in session
 - Default path: `/control/organizer/<slug>/bank-sync/callback`
+- Must be registered as redirect URI for your Enable Banking application (HTTPS)
 
 ### Migration errors
 
@@ -78,16 +87,4 @@ python -m pretix migrate pretix_bank_sync
 
 ### Sync blocked / rate limited
 
-Banks typically allow only ~4 successful account-data requests per day. The plugin
-spaces automatic syncs (~6 hours apart), caches account IDs, and pauses on HTTP 429.
-If the control panel shows “Rate limited”, wait for the cooldown — do not re-authorize
-just to reset fetches.
-
-## Behaviour
-
-1. One bank connection per organizer (multiple accounts under that consent OK)
-2. Periodic sync runs up to 4 times per day per active connection (spaced ~6h)
-3. Prefer payment references `EVENTSLUG-ORDERCODE`; also matches order code / sender / amount
-4. High-confidence EUR event+order or exact matches auto-confirm when `pretix_bank_sync_auto_confirm` is enabled (default)
-5. Unclear matches: **Organizer → Bank Sync → Review queue** (approve / assign / discard); event view shows that event’s matches
-6. Consent expiry: email (~7 days) to users with organizer settings permission; **Renew** available while active if ≤14 days left
+Banks may limit successful account-data calls (often ~4/day per scope). Wait for the cooldown shown in the UI, or use a later manual fetch.

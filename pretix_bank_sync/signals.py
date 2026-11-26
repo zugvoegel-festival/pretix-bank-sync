@@ -17,10 +17,10 @@ from .models import BankConnection
 
 logger = logging.getLogger(__name__)
 
-# Register plugin settings defaults (keys must match views/tasks)
-settings_hierarkey.add_default("pretix_bank_sync_gocardless_client_id", "", str)
-settings_hierarkey.add_default("pretix_bank_sync_gocardless_client_secret", "", str)
-settings_hierarkey.add_default("pretix_bank_sync_gocardless_redirect_uri", "", str)
+settings_hierarkey.add_default("pretix_bank_sync_enablebanking_app_id", "", str)
+settings_hierarkey.add_default("pretix_bank_sync_enablebanking_private_key", "", str)
+settings_hierarkey.add_default("pretix_bank_sync_enablebanking_country", "DE", str)
+settings_hierarkey.add_default("pretix_bank_sync_enablebanking_fetch_interval", "0", str)
 # hierarkey expects a *serialized* default (string); bool True breaks some paths
 settings_hierarkey.add_default("pretix_bank_sync_auto_confirm", "True", bool)
 
@@ -55,23 +55,20 @@ def periodic_sync_transactions(sender, **kwargs):
     """
     Periodic task to sync bank transactions.
 
-    Respects the GoCardless/bank budget (max 4 syncs/day, spaced ~6h apart).
-    The sync task itself atomically claims the attempt; we only pre-check here
-    to avoid flooding the queue.
+    Respects the plugin budget (max syncs/day, spaced apart). The sync task
+    itself atomically claims the attempt; we only pre-check here to avoid
+    flooding the queue.
     """
     from django.core.cache import cache
 
     from .tasks import sync_bank_transactions
     from .services.rate_limit import MAX_SYNCS_PER_DAY, MIN_SYNC_INTERVAL
 
-    # Get all active connections that can sync
     connections = BankConnection.objects.filter(status=BankConnection.STATUS_ACTIVE)
 
     for connection in connections:
-        # Reset daily counter if needed
         connection.reset_daily_counter()
 
-        # Pre-check without claiming — task calls try_begin_sync
         if not connection.can_sync(force=False):
             logger.debug(
                 f"Skipping sync for connection {connection.id}: "
@@ -80,13 +77,11 @@ def periodic_sync_transactions(sender, **kwargs):
             )
             continue
 
-        # Debounce queueing until spacing window elapses (task also claims a slot)
         queue_key = f'bank_sync_queued_{connection.id}'
         if not cache.add(queue_key, True, timeout=int(MIN_SYNC_INTERVAL.total_seconds())):
             logger.debug(f"Sync already queued recently for connection {connection.id}")
             continue
 
-        # Trigger async sync task
         try:
             sync_bank_transactions.apply_async(
                 kwargs={'connection_id': connection.id, 'force': False}
@@ -105,8 +100,7 @@ def periodic_sync_transactions(sender, **kwargs):
 def periodic_check_expiry_warnings(sender, **kwargs):
     """Periodic task to check for connections expiring soon and send warnings."""
     from .tasks import check_connection_expiry_warnings
-    
-    # Queue expiry check task (runs daily)
+
     try:
         check_connection_expiry_warnings.apply_async()
         logger.debug("Queued expiry warning check task")
@@ -119,7 +113,7 @@ def nav_event_transactions(sender, request, **kwargs):
     """Add Bank Transaction Matches to event navigation."""
     if not request.user.has_event_permission(request.organizer, request.event, 'can_change_orders', request=request):
         return []
-    
+
     url = resolve(request.path_info)
     return [{
         'label': _('Bank Transactions'),

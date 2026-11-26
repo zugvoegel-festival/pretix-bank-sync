@@ -1,4 +1,4 @@
-"""Unit tests for GoCardless credential encryption helpers."""
+"""Unit tests for Enable Banking credential encryption helpers."""
 from __future__ import annotations
 
 import django
@@ -19,7 +19,7 @@ from pretix_bank_sync.services.credentials import (  # noqa: E402
 
 
 def test_encrypt_decrypt_roundtrip():
-    plain = "gc-secret-key-value"
+    plain = "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----"
     stored = encrypt_secret(plain)
     assert stored.startswith(ENC_PREFIX)
     assert stored != plain

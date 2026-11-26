@@ -27,10 +27,10 @@ from pretix.base.services.orders import change_payment_provider
 from pretix.base.services.tasks import TransactionAwareTask
 from pretix.celery_app import app
 
-from .models import BankConnection, BankTransaction, TransactionMatchSuggestion
-from .services.gocardless_service import GoCardlessService
+from .models import BankAccount, BankConnection, BankTransaction, TransactionMatchSuggestion
+from .services.enablebanking_service import EnableBankingService
 from .services.notifications import send_connection_notification
-from .services.credentials import get_gocardless_credentials
+from .services.credentials import get_enablebanking_credentials
 from .services.rate_limit import RateLimitExceeded
 
 logger = logging.getLogger(__name__)
@@ -938,14 +938,17 @@ def match_transactions(connection: BankConnection):
 
 
 @app.task(base=TransactionAwareTask, bind=True, max_retries=3, default_retry_delay=60)
-def sync_bank_transactions(self, connection_id: int, force: bool = False):
+def sync_bank_transactions(self, connection_id: int, force: bool = False, date_from: str = None):
     """
-    Sync transactions from GoCardless for a bank connection.
+    Sync transactions from Enable Banking for a bank connection.
 
-    Uses a lean API path (requisition account IDs + transactions only) and
-    respects the plugin rate-limit budget. Pass force=True for manual fetches
-    (bypasses spacing interval, not the daily cap / 429 cooldown).
+    Fetches only active BankAccount rows, uses last_fetch_date (or date_from)
+    for incremental pulls, and respects the plugin rate-limit budget.
+    Pass force=True for manual fetches (bypasses spacing interval, not the
+    daily cap / 429 cooldown).
     """
+    from datetime import date as date_cls
+
     with scope(organizer=None):
         try:
             connection = BankConnection.objects.get(pk=connection_id)
@@ -954,7 +957,6 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
             return
 
     with scope(organizer=connection.organizer):
-        # Atomically claim a sync attempt (spacing + overlap + daily/429 checks)
         if not connection.try_begin_sync(force=force):
             reason = connection.sync_block_reason(force=force)
             logger.warning(
@@ -962,96 +964,98 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
             )
             return
 
-        # Get settings
         organizer = connection.organizer
-        client_id, client_secret, redirect_uri = get_gocardless_credentials(organizer)
+        app_id, private_key = get_enablebanking_credentials(organizer)
 
-        if not client_id or not client_secret:
-            logger.error(f"GoCardless credentials not configured for organizer {organizer.slug}")
+        if not app_id or not private_key:
+            logger.error(f"Enable Banking credentials not configured for organizer {organizer.slug}")
             old_status = connection.status
             connection.status = BankConnection.STATUS_ERROR
-            connection.last_error = "GoCardless credentials not configured"
+            connection.last_error = "Enable Banking credentials not configured"
             connection.last_error_at = now()
             connection.save(update_fields=['status', 'last_error', 'last_error_at'])
-            
-            # Send notification if status changed to error (using cache)
+
             if old_status != BankConnection.STATUS_ERROR:
                 cache_key = f'bank_connection_{connection_id}_status_error_sent'
                 if not cache.get(cache_key):
                     try:
                         send_connection_notification(connection, 'needs_reauthorization')
-                        # Store in cache for 30 days (status won't change back quickly)
                         cache.set(cache_key, True, timeout=30 * 24 * 60 * 60)
                     except Exception as e:
                         logger.error(f"Failed to send error notification for connection {connection_id}: {e}")
             return
 
         try:
-            # Initialize service
-            service = GoCardlessService(
-                client_id=client_id,
-                client_secret=client_secret,
-                redirect_uri=redirect_uri or ''
-            )
+            service = EnableBankingService(app_id=app_id, private_key_pem=private_key)
 
-            # Get requisition ID
-            requisition_id = connection.requisition_id
-            if not requisition_id:
-                logger.error(f"No requisition ID found for connection {connection_id}")
+            accounts = list(connection.accounts.filter(is_active=True))
+            if not accounts and connection.account_ids:
+                # Fallback for connections created before BankAccount rows existed
+                accounts = [
+                    BankAccount(
+                        connection=connection,
+                        account_uid=uid,
+                        is_active=True,
+                    )
+                    for uid in connection.account_ids
+                    if uid
+                ]
+
+            if not accounts:
+                logger.warning(f"No active accounts found for connection {connection_id}")
                 return
 
-            # Lean path: account IDs only — do not call details/balances during sync
-            account_ids = list(connection.account_ids or [])
-            if not account_ids:
-                account_ids = service.list_account_ids(requisition_id)
-                if account_ids:
-                    connection.account_ids = account_ids
-                    connection.save(update_fields=['account_ids'])
-
-            if not account_ids:
-                logger.warning(f"No accounts found for connection {connection_id}")
-                return
-
-            # Check for expiry warning (7 days before expiration)
             if connection.consent_expires_at:
                 days_until_expiry = (connection.consent_expires_at - now()).days
                 if 0 < days_until_expiry <= 7:
-                    # Check if we need to send warning using cache
                     cache_key = f'bank_connection_{connection_id}_warning_sent'
                     last_warning = cache.get(cache_key)
                     should_send = not last_warning or (now() - last_warning).days >= 7
-                    
                     if should_send:
                         try:
                             send_connection_notification(connection, 'expiring_soon')
-                            # Store in cache for 7 days
                             cache.set(cache_key, now(), timeout=7 * 24 * 60 * 60)
                         except Exception as e:
                             logger.error(f"Failed to send expiry warning for connection {connection_id}: {e}")
 
-            # Get transactions for each account
+            override_from = None
+            if date_from:
+                try:
+                    override_from = date_cls.fromisoformat(date_from)
+                except ValueError:
+                    logger.warning("Invalid date_from %s; ignoring", date_from)
+
             new_transactions = []
             fetched_any = False
             total_api = 0
             total_skipped_no_id = 0
             total_duplicates = 0
             total_errors = 0
-            for account_id in account_ids:
-                if not account_id:
+
+            for account in accounts:
+                account_uid = account.account_uid
+                if not account_uid:
                     continue
 
+                if override_from:
+                    fetch_from = override_from
+                elif getattr(account, 'last_fetch_date', None):
+                    fetch_from = account.last_fetch_date
+                else:
+                    fetch_from = now().date() - timedelta(days=30)
+
                 try:
-                    transactions = service.get_transactions(account_id)
+                    transactions = service.get_transactions(account_uid, date_from=fetch_from)
                     fetched_any = True
                     total_api += len(transactions)
                     for tx_data in transactions:
                         try:
-                            normalized = service.normalize_transaction(tx_data, account_id)
+                            normalized = service.normalize_transaction(tx_data, account_uid)
                         except Exception:
                             total_errors += 1
                             logger.exception(
                                 "Failed to normalize transaction for account %s",
-                                account_id,
+                                account_uid,
                             )
                             continue
 
@@ -1060,17 +1064,12 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
                             total_skipped_no_id += 1
                             continue
 
-                        if BankTransaction.objects.filter(
-                            transaction_id=transaction_id
-                        ).exists():
+                        if BankTransaction.objects.filter(transaction_id=transaction_id).exists():
                             total_duplicates += 1
                             continue
 
                         try:
-                            trans = BankTransaction(
-                                connection=connection,
-                                **normalized
-                            )
+                            trans = BankTransaction(connection=connection, **normalized)
                             trans.save()
                             new_transactions.append(trans)
                         except Exception:
@@ -1078,26 +1077,30 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
                             logger.exception(
                                 "Failed to save transaction %s for account %s",
                                 transaction_id,
-                                account_id,
+                                account_uid,
                             )
                             continue
+
+                    if getattr(account, 'pk', None):
+                        account.last_fetched = now()
+                        account.last_fetch_date = now().date()
+                        account.save(update_fields=['last_fetched', 'last_fetch_date'])
 
                 except RateLimitExceeded as e:
                     until = now() + e.retry_after
                     connection.mark_rate_limited(
                         until,
-                        message=f"Rate limit on transactions for account {account_id}: {e}",
+                        message=f"Rate limit on transactions for account {account_uid}: {e}",
                     )
                     logger.warning(
                         f"Rate limited syncing connection {connection_id} "
-                        f"account {account_id}; paused until {until}"
+                        f"account {account_uid}; paused until {until}"
                     )
-                    # Count partial progress if we already fetched at least one account
                     if fetched_any:
                         connection.record_sync_success()
                     return
                 except Exception as e:
-                    logger.error(f"Error fetching transactions for account {account_id}: {e}")
+                    logger.error(f"Error fetching transactions for account {account_uid}: {e}")
                     continue
 
             if fetched_any:
@@ -1115,7 +1118,6 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
                 total_errors,
             )
 
-            # Match new transactions (never fail the sync HTTP path on match errors)
             if new_transactions:
                 logger.info(f"Synced {len(new_transactions)} new transactions for connection {connection_id}")
                 try:
@@ -1126,20 +1128,17 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
                         connection_id,
                     )
 
-            # Check if consent has expired
             if connection.consent_expires_at and connection.consent_expires_at < now():
                 old_status = connection.status
                 connection.status = BankConnection.STATUS_EXPIRED
                 connection.save(update_fields=['status'])
                 logger.warning(f"Connection {connection_id} consent has expired")
-                
-                # Send notification if status changed to expired (using cache)
+
                 if old_status != BankConnection.STATUS_EXPIRED:
                     cache_key = f'bank_connection_{connection_id}_status_expired_sent'
                     if not cache.get(cache_key):
                         try:
                             send_connection_notification(connection, 'needs_reauthorization')
-                            # Store in cache for 30 days
                             cache.set(cache_key, True, timeout=30 * 24 * 60 * 60)
                         except Exception as e:
                             logger.error(f"Failed to send expiry notification for connection {connection_id}: {e}")
@@ -1156,14 +1155,12 @@ def sync_bank_transactions(self, connection_id: int, force: bool = False):
             connection.last_error = str(e)
             connection.last_error_at = now()
             connection.save(update_fields=['status', 'last_error', 'last_error_at'])
-            
-            # Send notification if status changed to error (using cache)
+
             if old_status != BankConnection.STATUS_ERROR:
                 cache_key = f'bank_connection_{connection_id}_status_error_sent'
                 if not cache.get(cache_key):
                     try:
                         send_connection_notification(connection, 'needs_reauthorization')
-                        # Store in cache for 30 days
                         cache.set(cache_key, True, timeout=30 * 24 * 60 * 60)
                     except Exception as e2:
                         logger.error(f"Failed to send error notification for connection {connection_id}: {e2}")
