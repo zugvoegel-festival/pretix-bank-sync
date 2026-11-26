@@ -1,7 +1,7 @@
 """
-GoCardless Bank Account Data rate-limit policy.
+Bank Account Data rate-limit policy.
 
-Banks (via GoCardless) typically allow as few as 4 successful requests per
+Banks (PSD2 AIS) typically allow as few as 4 successful requests per
 day per account access scope (details / balances / transactions). This module
 centralizes the plugin's sync budget so we stay within that ceiling.
 

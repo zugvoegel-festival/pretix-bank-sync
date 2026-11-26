@@ -40,9 +40,10 @@
 
                 <div class="alert alert-info">
                     {% blocktrans trimmed %}
-                        Create or copy your Secret ID and Secret Key from the GoCardless Bank Account Data portal
-                        (<a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">https://bankaccountdata.gocardless.com/</a>),
-                        under <strong>User Secrets</strong>.
+                        Create an application at
+                        <a href="https://enablebanking.com/cp/applications" target="_blank" rel="noopener noreferrer">Enable Banking</a>,
+                        upload your public key, and enter the Application ID plus RSA private key (PEM) below.
+                        Register this callback as redirect URL: <code>{{ callback_url }}</code>
                     {% endblocktrans %}
                 </div>
 
@@ -50,49 +51,22 @@
                     {% csrf_token %}
                     <input type="hidden" name="step" value="credentials">
                     <div class="form-group">
-                        <label class="col-md-3 control-label">{% trans "Secret ID" %}</label>
+                        <label class="col-md-3 control-label">{% trans "Application ID" %}</label>
                         <div class="col-md-9">
                             <input type="text" name="client_id" class="form-control" value="{{ client_id }}" required autocomplete="off">
-                            <p class="help-block">
-                                {% blocktrans trimmed %}
-                                    From
-                                    <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
-                                    → User Secrets
-                                {% endblocktrans %}
-                            </p>
                         </div>
                     </div>
                     <div class="form-group">
-                        <label class="col-md-3 control-label">{% trans "Secret Key" %}</label>
+                        <label class="col-md-3 control-label">{% trans "Private Key (PEM)" %}</label>
                         <div class="col-md-9">
-                            <input type="password" name="client_secret" class="form-control" value=""
-                                   autocomplete="new-password"
-                                   {% if not secret_configured %}required{% endif %}
-                                   placeholder="{% if secret_configured %}{% trans 'Leave blank to keep current encrypted key' %}{% endif %}">
+                            <textarea name="client_secret" class="form-control" rows="8"
+                                      style="font-family: monospace;"
+                                      autocomplete="new-password"
+                                      {% if not secret_configured %}required{% endif %}
+                                      placeholder="{% if secret_configured %}{% trans 'Leave blank to keep current encrypted key' %}{% else %}{% trans '-----BEGIN PRIVATE KEY-----' %}{% endif %}"></textarea>
                             {% if secret_configured %}
-                                <p class="help-block">{% trans "A Secret Key is already stored encrypted. Leave blank to keep it." %}</p>
-                            {% else %}
-                                <p class="help-block">
-                                    {% blocktrans trimmed %}
-                                        From
-                                        <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
-                                        → User Secrets
-                                    {% endblocktrans %}
-                                </p>
+                                <p class="help-block">{% trans "A private key is already stored encrypted. Leave blank to keep it." %}</p>
                             {% endif %}
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label class="col-md-3 control-label">{% trans "Redirect URI (optional)" %}</label>
-                        <div class="col-md-9">
-                            <input type="url" name="redirect_uri" class="form-control" value="{{ redirect_uri }}"
-                                   placeholder="{{ callback_url }}">
-                            <p class="help-block">
-                                {% blocktrans trimmed with url=callback_url %}
-                                    Leave empty to use the plugin callback:
-                                    <code>{{ url }}</code>
-                                {% endblocktrans %}
-                            </p>
                         </div>
                     </div>
                     <div class="form-group submit-group">
@@ -112,23 +86,6 @@
                                 <option value="">{% trans "— Select —" %}</option>
                                 {% for code, name in countries %}
                                     <option value="{{ code }}" {% if selected_country == code %}selected{% endif %}>{{ name }}</option>
-                                {% empty %}
-                                    <option value="DE" {% if selected_country == 'DE' %}selected{% endif %}>Germany (DE)</option>
-                                    <option value="AT" {% if selected_country == 'AT' %}selected{% endif %}>Austria (AT)</option>
-                                    <option value="CH" {% if selected_country == 'CH' %}selected{% endif %}>Switzerland (CH)</option>
-                                    <option value="NL" {% if selected_country == 'NL' %}selected{% endif %}>Netherlands (NL)</option>
-                                    <option value="BE" {% if selected_country == 'BE' %}selected{% endif %}>Belgium (BE)</option>
-                                    <option value="FR" {% if selected_country == 'FR' %}selected{% endif %}>France (FR)</option>
-                                    <option value="GB" {% if selected_country == 'GB' %}selected{% endif %}>United Kingdom (GB)</option>
-                                    <option value="IE" {% if selected_country == 'IE' %}selected{% endif %}>Ireland (IE)</option>
-                                    <option value="ES" {% if selected_country == 'ES' %}selected{% endif %}>Spain (ES)</option>
-                                    <option value="IT" {% if selected_country == 'IT' %}selected{% endif %}>Italy (IT)</option>
-                                    <option value="PT" {% if selected_country == 'PT' %}selected{% endif %}>Portugal (PT)</option>
-                                    <option value="PL" {% if selected_country == 'PL' %}selected{% endif %}>Poland (PL)</option>
-                                    <option value="SE" {% if selected_country == 'SE' %}selected{% endif %}>Sweden (SE)</option>
-                                    <option value="FI" {% if selected_country == 'FI' %}selected{% endif %}>Finland (FI)</option>
-                                    <option value="NO" {% if selected_country == 'NO' %}selected{% endif %}>Norway (NO)</option>
-                                    <option value="DK" {% if selected_country == 'DK' %}selected{% endif %}>Denmark (DK)</option>
                                 {% endfor %}
                             </select>
                         </div>
@@ -155,18 +112,19 @@
                             <input type="hidden" name="step" value="select_bank">
                             <div class="form-group">
                                 <label for="institution_id">{% trans "Bank" %}</label>
-                                {# Options are server-rendered: pretix CSP blocks inline scripts. #}
                                 <select name="institution_id" id="institution_id" class="form-control" required>
                                     <option value="">{% trans "— Select a bank —" %}</option>
                                     {% for inst in institutions %}
-                                        <option value="{{ inst.id }}" {% if selected_institution == inst.id %}selected{% endif %}>
-                                            {{ inst.name }}{% if inst.bic %} ({{ inst.bic }}){% endif %}
+                                        <option value="{{ inst.id }}"
+                                                data-maximum-consent-validity="{{ inst.maximum_consent_validity|default:'' }}"
+                                                {% if selected_institution == inst.id %}selected{% endif %}>
+                                            {{ inst.name }}
                                         </option>
                                     {% endfor %}
                                 </select>
                             </div>
                             <div class="form-group submit-group">
-                                <button type="submit" class="btn btn-primary">{% trans "Continue" %}</button>
+                                <button type="submit" class="btn btn-primary">{% trans "Connect with bank" %}</button>
                             </div>
                         </form>
                     {% else %}
@@ -178,23 +136,6 @@
                         </p>
                     {% endif %}
                 {% endif %}
-            {% elif step == 'create_requisition' %}
-                <p>
-                    {% if selected_institution %}
-                        {% blocktrans trimmed with inst=selected_institution %}
-                            Selected institution: <code>{{ inst }}</code>
-                        {% endblocktrans %}
-                    {% else %}
-                        {% trans "No institution selected." %}
-                    {% endif %}
-                </p>
-                <form method="post" action="">
-                    {% csrf_token %}
-                    <input type="hidden" name="step" value="create_requisition">
-                    <button type="submit" class="btn btn-primary" {% if not selected_institution %}disabled{% endif %}>
-                        {% trans "Create requisition" %}
-                    </button>
-                </form>
 
             {% elif step == 'authorize' %}
                 {% if has_auth_link %}
@@ -214,62 +155,65 @@
                     </form>
                 {% else %}
                     <div class="alert alert-warning">
-                        {% trans "No authorization link found. Go back and create a requisition first." %}
+                        {% trans "No authorization link found. Go back and select a bank first." %}
                     </div>
-                    <a href="?step=create_requisition" class="btn btn-default">{% trans "Back" %}</a>
+                    <a href="?step=select_bank" class="btn btn-default">{% trans "Back" %}</a>
                 {% endif %}
 
             {% elif step == 'verify' %}
-                {% if error %}
-                    <div class="alert alert-danger">{{ error }}</div>
-                {% elif requisition %}
-                    <p>
-                        {% trans "Requisition status" %}:
-                        <strong>{{ requisition_status }}</strong>
-                    </p>
-                    {% if accounts %}
-                        <ul>
-                            {% for account in accounts %}
-                                <li>
-                                    {{ account.iban|default:account.id }}
-                                    {% if account.name %} — {{ account.name }}{% endif %}
-                                </li>
-                            {% endfor %}
-                        </ul>
-                    {% endif %}
-                    <a href="?step=test{% if connection %}&connection_id={{ connection.pk }}{% endif %}" class="btn btn-primary">
-                        {% trans "Continue to balance test" %}
-                    </a>
-                {% else %}
+                {% if sandbox_mode %}
                     <div class="alert alert-warning">
-                        {% trans "No connection to verify. Complete authorization first." %}
+                        <strong>{% trans "Sandbox mode" %}</strong> —
+                        {% trans "You appear to be connected to a mock bank." %}
                     </div>
                 {% endif %}
-
-            {% elif step == 'test' %}
-                {% if test_success %}
-                    <div class="alert alert-success">{% trans "Successfully fetched account balances." %}</div>
-                    <p><strong>{% trans "Account" %}:</strong> {{ test_account_id }}</p>
-                    {% if test_balances %}
-                        <pre>{{ test_balances }}</pre>
+                {% if connection and connection.status == 'active' %}
+                    <div class="alert alert-success">
+                        {% blocktrans trimmed with name=connection.aspsp_name %}
+                            Connected to {{ name }}.
+                        {% endblocktrans %}
+                    </div>
+                    {% if accounts %}
+                        <form method="post" action="">
+                            {% csrf_token %}
+                            <input type="hidden" name="step" value="verify">
+                            <input type="hidden" name="action" value="update_accounts">
+                            <p>{% trans "Select which accounts to sync:" %}</p>
+                            <table class="table table-condensed">
+                                <thead>
+                                    <tr>
+                                        <th>{% trans "Active" %}</th>
+                                        <th>{% trans "Account" %}</th>
+                                        <th>{% trans "IBAN" %}</th>
+                                        <th>{% trans "Currency" %}</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for account in accounts %}
+                                        <tr>
+                                            <td>
+                                                <input type="checkbox" name="active_accounts" value="{{ account.pk }}"
+                                                       {% if account.is_active %}checked{% endif %}>
+                                            </td>
+                                            <td>{{ account.account_name|default:account.account_uid }}</td>
+                                            <td><code>{{ account.masked_iban|default:account.iban }}</code></td>
+                                            <td>{{ account.currency }}</td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                            <button type="submit" class="btn btn-primary">{% trans "Save and finish" %}</button>
+                        </form>
+                    {% else %}
+                        <p class="text-muted">{% trans "No accounts returned by the bank." %}</p>
+                        <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-primary">
+                            {% trans "Done" %}
+                        </a>
                     {% endif %}
-                    <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-primary">
-                        {% trans "Done" %}
-                    </a>
-                {% elif error %}
-                    <div class="alert alert-danger">{{ error }}</div>
-                    <form method="post" action="">
-                        {% csrf_token %}
-                        <input type="hidden" name="step" value="test">
-                        <button type="submit" class="btn btn-default">{% trans "Retry" %}</button>
-                    </form>
                 {% else %}
                     <div class="alert alert-warning">
-                        {% trans "Connect and authorize a bank account before testing balances." %}
+                        {% trans "No active connection to verify. Complete authorization first." %}
                     </div>
-                    <a href="{% url 'plugins:pretix_bank_sync:connections_list' organizer=organizer.slug %}" class="btn btn-default">
-                        {% trans "Back to connections" %}
-                    </a>
                 {% endif %}
 
             {% else %}

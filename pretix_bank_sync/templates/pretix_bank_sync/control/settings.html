@@ -22,85 +22,89 @@
 
     <div class="alert alert-info">
         {% blocktrans trimmed %}
-            Create or copy your Secret ID and Secret Key from the GoCardless Bank Account Data portal
-            (<a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">https://bankaccountdata.gocardless.com/</a>),
-            under <strong>User Secrets</strong>.
-            The Secret Key is encrypted at rest and never shown again after saving;
-            leave the Secret Key field blank to keep the current key.
+            Create an application at
+            <a href="https://enablebanking.com/cp/applications" target="_blank" rel="noopener noreferrer">Enable Banking</a>,
+            register your public key, and paste the Application ID plus RSA private key (PEM) below.
+            The private key is encrypted at rest and never shown again after saving;
+            leave the key field blank to keep the current key.
+            Set the redirect URL to your plugin callback
+            (<code>/control/organizer/{{ organizer.slug }}/bank-sync/callback</code>).
         {% endblocktrans %}
     </div>
 
-    <div>
-        <div id="gocardless">
-            <div class="panel panel-default">
-                <div class="panel-heading">
-                    <h3 class="panel-title">{% trans "GoCardless Configuration" %}</h3>
-                </div>
-                <div class="panel-body">
-                    <form action="" method="post" class="form-horizontal" autocomplete="off">
-                        {% csrf_token %}
-                        <input type="hidden" name="tab" value="gocardless">
-                        <fieldset>
-                            <legend>{% trans "API Credentials" %}</legend>
-                            <div class="form-group">
-                                <label class="col-md-3 control-label">{% trans "Client ID (Secret ID)" %}</label>
-                                <div class="col-md-9">
-                                    <input type="text" name="gocardless_client_id" class="form-control" 
-                                           value="{{ gocardless_client_id }}" 
-                                           autocomplete="off"
-                                           placeholder="{% trans 'Enter your GoCardless Secret ID' %}">
-                                    <p class="help-block">
-                                        {% blocktrans trimmed %}
-                                            From
-                                            <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
-                                            → User Secrets
-                                        {% endblocktrans %}
-                                    </p>
-                                </div>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label class="col-md-3 control-label">{% trans "Client Secret (Secret Key)" %}</label>
-                                <div class="col-md-9">
-                                    <input type="password" name="gocardless_client_secret" class="form-control" 
-                                           value=""
-                                           autocomplete="new-password"
-                                           placeholder="{% if secret_configured %}{% trans '••••••••  (leave blank to keep current key)' %}{% else %}{% trans 'Enter your GoCardless Secret Key' %}{% endif %}">
-                                    <p class="help-block">
-                                        {% if secret_configured %}
-                                            {% trans "A Secret Key is already stored (encrypted). Enter a new value only to replace it." %}
-                                        {% else %}
-                                            {% blocktrans trimmed %}
-                                                From
-                                                <a href="https://bankaccountdata.gocardless.com/" target="_blank" rel="noopener noreferrer">bankaccountdata.gocardless.com</a>
-                                                → User Secrets
-                                            {% endblocktrans %}
-                                        {% endif %}
-                                    </p>
-                                </div>
-                            </div>
+    {% if sandbox_mode %}
+        <div class="alert alert-warning">
+            <strong>{% trans "Sandbox mode" %}</strong> —
+            {% trans "The connected bank looks like a mock/sandbox ASPSP." %}
+        </div>
+    {% endif %}
 
-                            <div class="form-group">
-                                <label class="col-md-3 control-label">{% trans "Auto-confirm matches" %}</label>
-                                <div class="col-md-9">
-                                    <div class="checkbox">
-                                        <label>
-                                            <input type="checkbox" name="auto_confirm" {% if auto_confirm %}checked{% endif %}>
-                                            {% trans "Automatically confirm high-confidence EUR exact order-code matches" %}
-                                        </label>
-                                    </div>
-                                </div>
-                            </div>
-                            
-                        </fieldset>
-                        <div class="form-group submit-group">
-                            <button type="submit" class="btn btn-primary btn-save">
-                                {% trans "Save" %}
-                            </button>
+    <div class="panel panel-default">
+        <div class="panel-heading">
+            <h3 class="panel-title">{% trans "Enable Banking Configuration" %}</h3>
+        </div>
+        <div class="panel-body">
+            <form action="" method="post" class="form-horizontal" autocomplete="off">
+                {% csrf_token %}
+                <input type="hidden" name="tab" value="enablebanking">
+                <fieldset>
+                    <legend>{% trans "API Credentials" %}</legend>
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Application ID" %}</label>
+                        <div class="col-md-9">
+                            <input type="text" name="enablebanking_app_id" class="form-control"
+                                   value="{{ enablebanking_app_id }}"
+                                   autocomplete="off"
+                                   placeholder="{% trans 'Enter your Enable Banking Application ID' %}">
                         </div>
-                    </form>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Private Key (PEM)" %}</label>
+                        <div class="col-md-9">
+                            <textarea name="enablebanking_private_key" class="form-control" rows="8"
+                                      style="font-family: monospace;"
+                                      autocomplete="new-password"
+                                      placeholder="{% if secret_configured %}{% trans '••••••••  (leave blank to keep current key)' %}{% else %}{% trans '-----BEGIN PRIVATE KEY-----' %}{% endif %}"></textarea>
+                            <p class="help-block">
+                                {% if secret_configured %}
+                                    {% trans "A private key is already stored (encrypted). Enter a new value only to replace it." %}
+                                {% else %}
+                                    {% trans "RSA private key in PEM format used to sign JWTs for the Enable Banking API." %}
+                                {% endif %}
+                            </p>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Default country" %}</label>
+                        <div class="col-md-9">
+                            <select name="enablebanking_country" class="form-control">
+                                {% for code, name in countries %}
+                                    <option value="{{ code }}" {% if default_country == code %}selected{% endif %}>{{ name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="col-md-3 control-label">{% trans "Auto-confirm matches" %}</label>
+                        <div class="col-md-9">
+                            <div class="checkbox">
+                                <label>
+                                    <input type="checkbox" name="auto_confirm" {% if auto_confirm %}checked{% endif %}>
+                                    {% trans "Automatically confirm high-confidence EUR exact order-code matches" %}
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+                </fieldset>
+                <div class="form-group submit-group">
+                    <button type="submit" class="btn btn-primary btn-save">
+                        {% trans "Save" %}
+                    </button>
                 </div>
-            </div>
+            </form>
         </div>
     </div>
 {% endblock %}

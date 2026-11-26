@@ -1,7 +1,7 @@
 """
 Models for Bank Sync plugin.
 
-Stores bank connections and synced transactions from GoCardless.
+Stores bank connections and synced transactions from Enable Banking.
 """
 import hashlib
 import re
@@ -18,7 +18,7 @@ from .services.rate_limit import MAX_SYNCS_PER_DAY, MIN_SYNC_INTERVAL, syncs_rem
 
 class BankConnection(LoggedModel):
     """
-    Represents a GoCardless bank account connection for an organizer.
+    Represents an Enable Banking bank account connection for an organizer.
     """
     STATUS_PENDING = 'pending'
     STATUS_ACTIVE = 'active'
@@ -41,17 +41,45 @@ class BankConnection(LoggedModel):
         help_text=_("The organizer this bank connection belongs to")
     )
 
-    # GoCardless identifiers
+    # Enable Banking identifiers
+    session_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        db_index=True,
+        help_text=_("Enable Banking session ID"),
+    )
+    # Legacy GoCardless field — kept nullable for migration compatibility
     requisition_id = models.CharField(
         max_length=255,
         unique=True,
+        null=True,
+        blank=True,
         db_index=True,
-        help_text=_("GoCardless requisition ID")
+        help_text=_("Legacy GoCardless requisition ID (unused)"),
+    )
+    aspsp_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default='',
+        help_text=_("Bank (ASPSP) name"),
+    )
+    aspsp_country = models.CharField(
+        max_length=10,
+        blank=True,
+        default='',
+        help_text=_("Bank country code"),
+    )
+    auth_link = models.URLField(
+        max_length=500,
+        blank=True,
+        default='',
+        help_text=_("Pending authorization URL"),
     )
     account_ids = models.JSONField(
         default=list,
         blank=True,
-        help_text=_("Cached GoCardless account IDs for this requisition (avoids details API calls)")
+        help_text=_("Cached account UIDs (legacy / fallback)"),
     )
 
     # Connection status
@@ -85,7 +113,7 @@ class BankConnection(LoggedModel):
     rate_limited_until = models.DateTimeField(
         null=True,
         blank=True,
-        help_text=_("Do not sync until this time after a GoCardless HTTP 429")
+        help_text=_("Do not sync until this time after a bank API HTTP 429")
     )
 
     # Consent management
@@ -97,8 +125,11 @@ class BankConnection(LoggedModel):
     consent_id = models.CharField(
         max_length=255,
         blank=True,
-        help_text=_("GoCardless consent ID")
+        help_text=_("Legacy consent ID (unused for Enable Banking)")
     )
+
+    def is_sandbox(self):
+        return "mock" in (self.aspsp_name or "").lower()
 
     # Error tracking
     last_error = models.TextField(
@@ -130,7 +161,7 @@ class BankConnection(LoggedModel):
             self.last_sync_date = today
 
     def is_rate_limited(self):
-        """True while a GoCardless 429 cooldown is active."""
+        """True while a bank API 429 cooldown is active."""
         return bool(self.rate_limited_until and self.rate_limited_until > now())
 
     def syncs_remaining_today(self):
@@ -226,7 +257,7 @@ class BankConnection(LoggedModel):
             self.rate_limited_until = conn.rate_limited_until
 
     def mark_rate_limited(self, until, message=""):
-        """Record a GoCardless 429 cooldown without flipping status to error."""
+        """Record a provider 429 cooldown without flipping status to error."""
         self.rate_limited_until = until
         self.last_error = message or str(
             _("Bank API rate limit exceeded. Sync paused until {when}.").format(when=until)
@@ -264,9 +295,41 @@ class BankConnection(LoggedModel):
             self.save(update_fields=['sync_count_today', 'last_sync_date'])
 
 
+class BankAccount(LoggedModel):
+    """
+    A bank account under an Enable Banking connection.
+    """
+    connection = models.ForeignKey(
+        BankConnection,
+        on_delete=models.CASCADE,
+        related_name='accounts',
+    )
+    account_uid = models.CharField(max_length=255)
+    account_name = models.CharField(max_length=255, blank=True, default='')
+    iban = models.CharField(max_length=34, blank=True, default='')
+    currency = models.CharField(max_length=10, default='EUR')
+    is_active = models.BooleanField(default=True)
+    last_fetched = models.DateTimeField(null=True, blank=True)
+    last_fetch_date = models.DateField(null=True, blank=True)
+
+    class Meta:
+        ordering = ('account_name', 'iban')
+        verbose_name = _("Bank Account")
+        verbose_name_plural = _("Bank Accounts")
+        unique_together = ('connection', 'account_uid')
+
+    def __str__(self):
+        return f"{self.account_name} ({self.iban})" if self.iban else self.account_uid
+
+    @property
+    def masked_iban(self):
+        from .services.redact import mask_iban
+        return mask_iban(self.iban)
+
+
 class BankTransaction(LoggedModel):
     """
-    Represents a bank transaction synced from GoCardless.
+    Represents a bank transaction synced from Enable Banking.
     """
     STATE_UNCHECKED = 'unchecked'
     STATE_NOMATCH = 'nomatch'
@@ -293,17 +356,17 @@ class BankTransaction(LoggedModel):
         help_text=_("The bank connection this transaction belongs to")
     )
 
-    # GoCardless transaction data
+    # Provider transaction data
     transaction_id = models.CharField(
         max_length=255,
         unique=True,
         db_index=True,
-        help_text=_("GoCardless transaction ID")
+        help_text=_("Bank transaction ID")
     )
     account_id = models.CharField(
         max_length=255,
         db_index=True,
-        help_text=_("GoCardless account ID")
+        help_text=_("Bank account UID")
     )
 
     # Transaction details
@@ -407,7 +470,7 @@ class BankTransaction(LoggedModel):
     # Metadata
     raw_data = models.JSONField(
         default=dict,
-        help_text=_("Raw transaction data from GoCardless (IBANs redacted)")
+        help_text=_("Raw transaction data from the bank provider (IBANs redacted)")
     )
 
     created = models.DateTimeField(auto_now_add=True)
